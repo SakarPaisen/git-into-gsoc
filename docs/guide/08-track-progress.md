@@ -6,7 +6,15 @@ A few notes help you remember what you learned and choose a next step. Start whe
 git-into-gsoc progress summary
 ```
 
-The summary is printed as JSON (structured text that scripts and assistants read easily). It lists completed phases, saved organizations, repositories, and issues: `completion` shows `0/10` on a fresh installation, and `next_phase` names the first phase you have not marked done. It is a personal checklist, not an application status or a measure of readiness.
+The summary is a readable list. It shows the ten phases with a check mark on the ones you finished and a `(next)` label on the first one you have not, then the organizations you shortlisted, the repositories and issues you track, and how many weekly notes you saved. On a fresh installation it starts with `0/10 phases done`. It is a personal checklist, not an application status or a measure of readiness.
+
+For a script or an assistant that reads structured text, add `--output json`:
+
+```bash
+git-into-gsoc progress summary --output json
+```
+
+That prints the same information as JSON, including `completion` as `0/10` and `next_phase` as the first phase you have not marked done.
 
 ## Save something you want to revisit
 
@@ -22,7 +30,7 @@ git-into-gsoc progress complete_phase --phase track
 
 The tool saves the text you provide; it does not assign the issue to you. Re-run `git-into-gsoc issue <link>` before you start work on a tracked issue, because availability changes daily during GSoC season.
 
-Valid phase names are `learn`, `discover`, `evaluate`, `orient`, `community`, `find_issues`, `contribute`, `iterate`, `proposal`, and `track`; the [journey map](../journey.md) shows which commands and guide page belong to each. Each guide chapter ends with the command for its own phase; mark `track` once keeping a weekly note is a habit. Mark a phase complete only when its goal is useful and satisfied for you. You can revisit any phase.
+Valid phase names are `learn`, `discover`, `evaluate`, `orient`, `community`, `find_issues`, `contribute`, `iterate`, `proposal`, and `track`. Guide chapters do not map to one command each: some have none and some use several. The [journey map](../journey.md) lists every phase with its commands and the guide page that explains it, so use it to find the command for the phase you want to mark. Mark `track` once keeping a weekly note is a habit. Mark a phase complete only when its goal is useful and satisfied for you. You can revisit any phase.
 
 ## Keep a weekly note
 
