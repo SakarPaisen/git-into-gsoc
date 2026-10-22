@@ -9,13 +9,16 @@ You need [Git](https://git-scm.com/downloads), [Python 3.11 or newer](https://ww
 ```bash
 git clone https://github.com/YOUR_USERNAME/git-into-gsoc.git
 cd git-into-gsoc
+git remote add upstream https://github.com/anandkaranubc/git-into-gsoc.git
 python3 -m venv .venv
 source .venv/bin/activate              # Windows PowerShell: .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
-pytest -q
+pre-commit install
+pytest
 ```
 
-`YOUR_USERNAME` is your GitHub username. When the tests pass, you are ready to change something. The sections below explain each step and what happens after you open a pull request.
+`YOUR_USERNAME` is your GitHub username. When pytest ends with a line such as "1003 passed", you are ready to change something. The sections below explain each step and what happens after you open a pull request.
 
 ## What we value
 
@@ -31,7 +34,7 @@ pytest -q
 - Report a bug or confusing behavior with a [bug report](https://github.com/anandkaranubc/git-into-gsoc/issues/new?template=bug_report.yml). `git-into-gsoc feedback --bug` fills in your versions.
 - Suggest an improvement with a [feature request](https://github.com/anandkaranubc/git-into-gsoc/issues/new?template=feature_request.yml).
 - Fix documentation. If an instruction did not work for you, that is a bug in the docs.
-- Pick an issue labeled [good first issue](https://github.com/anandkaranubc/git-into-gsoc/labels/good%20first%20issue) or [help wanted](https://github.com/anandkaranubc/git-into-gsoc/labels/help%20wanted). Comment with what you plan to do so nobody duplicates the work. Practise the habit this tool teaches: run `git-into-gsoc issue anandkaranubc/git-into-gsoc#NUMBER` first to see whether someone already claimed it.
+- Pick an issue labeled [good first issue](https://github.com/anandkaranubc/git-into-gsoc/labels/good%20first%20issue) or [help wanted](https://github.com/anandkaranubc/git-into-gsoc/labels/help%20wanted). Practise the habit this tool teaches: run `git-into-gsoc issue anandkaranubc/git-into-gsoc#NUMBER` first to see whether someone already claimed it. If nobody has, you do not need to wait to be assigned: comment with what you plan to do, then start.
 - Improve the Agent Skill in `skills/git-into-gsoc/` or add an MCP tool.
 
 For larger changes, open an issue first so we can agree on the approach before you spend time on it.
@@ -55,6 +58,7 @@ You need [Git](https://git-scm.com/downloads) and [Python 3.11 or newer](https:/
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate        # Windows PowerShell: .\.venv\Scripts\Activate.ps1
+   python -m pip install --upgrade pip
    python -m pip install -e ".[dev]"
    pre-commit install
    ```
@@ -86,11 +90,15 @@ Run `source .venv/bin/activate` again in every new terminal. If `./install.sh` w
 3. Run the checks. CI (continuous integration, the checks GitHub runs automatically on every pull request) runs the same ones:
 
    ```bash
-   ruff check src tests
-   ruff format src tests
+   ruff check src tests scripts
+   ruff format src tests scripts
    mypy src
    pytest
    ```
+
+   CI also measures test coverage (it must stay at 85% or more) and runs `pip-audit` to look for known security problems in the dependencies. A new feature with tests keeps coverage where it is.
+
+   The full test suite takes about 30 seconds on a recent laptop. While you work, run only the file you changed, such as `pytest tests/unit/test_next.py`, and run everything once before you push.
 
    `pre-commit run --all-files` runs the first three at once. Tests that need the network must fake it with `respx`, a library that returns prepared HTTP responses; the test setup blocks real connections so results stay reproducible.
 
@@ -99,6 +107,8 @@ Run `source .venv/bin/activate` again in every new terminal. If `./install.sh` w
    ```text
    fix(cli): explain how to activate the environment after install
    ```
+
+   Commit from a terminal where `.venv` is active. The commit hook runs ruff and mypy from whatever is on your `PATH`, so outside the environment it may use other versions, or fail with an error that has nothing to do with your change.
 
    Types we use: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `ci`, `chore`. Add a scope in parentheses when it helps, such as `cli`, `github`, `gsoc`, `skill`, or `docs`. Releases and the changelog are generated from these messages, so `feat` means a new capability for users and `fix` means a bug fix.
 
