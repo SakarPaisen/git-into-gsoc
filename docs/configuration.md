@@ -4,27 +4,85 @@ You can use the tool without changing any settings. Run `git-into-gsoc doctor` t
 
 ## GitHub token
 
-GitHub allows 60 unauthenticated API requests per hour and 5,000 with a token. Repository and issue checks make several requests each, so you will hit the limit quickly without one. The tool looks for a token in this order, and `doctor` says whether it came from the environment or the GitHub CLI:
+GitHub allows 60 unauthenticated API requests per hour and 5,000 with a token. Repository and issue checks make several requests each, so you will hit the limit quickly without one. You can also skip a token entirely and keep working: the tool then makes fewer requests and tells you when the limit is reached.
 
-1. `GIG_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` in the process environment (checked in that order when more than one is set)
-2. The same three names in a `.env` file in the current folder
-3. The [GitHub CLI](https://cli.github.com/): if `gh` is installed and you have run `gh auth login`, the tool runs `gh auth token` for you
+The tool looks for a token in this order. The source in brackets is what `git-into-gsoc doctor` prints under `GitHub token:`.
 
-The GitHub CLI route is the easiest and works for the MCP server too, because it does not depend on which terminal exported a variable. Set `GIG_USE_GH_CLI=false` to disable it. Besides the higher limit, a token lets `repo` use one GraphQL query, which reads each pull request's own timeline for the first human reply instead of estimating it from recent comments, and uses fewer requests.
+1. `GIG_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` in the process environment, checked in that order (prints as `found via environment` or `found via $GITHUB_TOKEN`)
+2. The [GitHub CLI](https://cli.github.com/): if `gh` is installed and you have run `gh auth login`, the tool runs `gh auth token` for you (prints as `found via gh auth token`). Set `GIG_USE_GH_CLI=false` to turn this off.
+3. The same three names in a `.env` file in the current folder (prints as `found via environment`)
 
-To use a personal access token instead, create one using [GitHub's instructions](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens). The tool reads public data only, so choose no scopes (or `public_repo` on classic tokens) and an expiration date. One way to supply it is a local `.env` file. From the repository folder:
+Besides the higher limit, a token lets `repo` use one GraphQL query, which reads each pull request's own timeline for the first human reply instead of estimating it from recent comments, and uses fewer requests.
+
+### Option 1: `gh auth login` (easiest)
+
+The GitHub CLI works without a repository clone and does not depend on which terminal exported a variable, so the MCP server finds the token too. Install `gh` from [cli.github.com](https://cli.github.com/), then run:
+
+```bash
+gh auth login
+```
+
+Choose **GitHub.com** and follow the prompts. Check that the tool found it:
+
+```bash
+git-into-gsoc doctor
+```
+
+You should see `GitHub token: found via gh auth token`.
+
+### Option 2: an environment variable in your terminal
+
+Use this when you prefer a personal access token, or when `gh` is not available. First create a token using [GitHub's instructions](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens). The tool reads public data only, so choose no scopes (or `public_repo` on classic tokens) and an expiration date.
+
+In the example below, `YOUR_TOKEN` is a placeholder. Replace it with the token you copied, and never paste a real token into an issue, a screenshot, or a chat.
+
+macOS and Linux, in the current terminal:
+
+```bash
+export GITHUB_TOKEN=YOUR_TOKEN
+git-into-gsoc doctor
+```
+
+PowerShell, in the current terminal:
+
+```powershell
+$env:GITHUB_TOKEN = "YOUR_TOKEN"
+git-into-gsoc doctor
+```
+
+`doctor` should print `GitHub token: found via environment`.
+
+A variable set this way lasts only for the terminal you typed it in. To keep it for every new macOS or Linux shell, add the `export` line to your shell's startup file, such as `~/.zshrc` on macOS or `~/.bashrc` on Linux, then open a new terminal. On Windows, `setx` saves it for future terminals:
+
+```powershell
+setx GITHUB_TOKEN "YOUR_TOKEN"
+```
+
+The current PowerShell window does not see a variable that `setx` just saved. Open a new one, then run `git-into-gsoc doctor` again. Keeping a token in a startup file means it is stored in plain text on your computer; the `.env` option below keeps it in one project instead.
+
+### Option 3: a `.env` file (when you work from a clone)
+
+This option needs a repository clone. From the repository folder:
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` in a text editor, enter your token after `GITHUB_TOKEN=`, and save it. `.env` is ignored by Git in this repository. The file is read from the **current working directory**, so it is not found automatically if you run the tool elsewhere. Do not paste tokens into issues, screenshots, or assistant chats.
+Open `.env` in a text editor, replace the `YOUR_TOKEN` placeholder with your token, and save the file:
+
+```text
+GITHUB_TOKEN=YOUR_TOKEN
+```
+
+`.env` is ignored by Git in this repository. The file is read from the **current working directory**, so it is not found automatically if you run the tool from another folder. If you installed with the one-line installer and have no clone, use Option 1 or Option 2 instead.
+
+For safety, a `.env` in the current folder cannot change where requests go. Settings such as `GIG_GITHUB_API_URL`, `GIG_GITLAB_HOST`, `GIG_CACHE_DIR`, and `GIG_DATA_DIR` are ignored there, with a warning, because that file may belong to a repository you just cloned. Set those in the environment if you really need them. The GitLab token, which is sent to the configured GitLab server, is read from `.env` but its host is not.
 
 After changing configuration, run a new command or restart the assistant's MCP connection; settings are cached inside a running process.
 
 ## Settings reference
 
-Put these in `.env` or export them in the process environment. Environment variables take precedence over `.env`. Service addresses (the `GIG_..._API_URL` settings), `GIG_CACHE_DIR`, and `GIG_DATA_DIR` are read from the environment only. A `.env` in the current folder may belong to a repository you just cloned, and assistants start the MCP server inside the project folder. Such a file must never be able to send your token to another server or swap in someone else's progress file, so those settings are ignored there with a warning.
+Put these in `.env` or export them in the process environment. Environment variables take precedence over `.env`. The service addresses (the `GIG_..._API_URL` settings), `GIG_CACHE_DIR`, `GIG_DATA_DIR`, and `GITLAB_HOST` are read from the environment only, for the safety reason given in Option 3 above.
 
 | Name | Default | Use |
 |---|---|---|
