@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from git_into_gsoc.models import RepoHealth
+from git_into_gsoc.models import HealthPoints, RepoHealth
 
 MIN_OUTSIDER_SAMPLE = 10  # below this, the outsider merge rate is shown but not scored
 MIN_REPLY_SAMPLE = 5  # below this, the first-reply time is shown but not scored
@@ -20,6 +20,8 @@ DORMANT_CAP = 57.0
 # that service has no commit history for a repository the score leaves these points out
 # instead of counting them as lost.
 NEWCOMER_POINTS = 6
+# Up to this many changed lines, the median merged outside PR is a focused change.
+FOCUSED_PR_LINES = 200
 
 
 def _days_or_hours(hours: float) -> str:
@@ -51,30 +53,43 @@ def score_repo_health(health: RepoHealth) -> RepoHealth:
     newcomer PRs.
     """
     score = 0.0
-    out_of = 100.0
     signals: list[str] = []
     warnings: list[str] = []
+    notes: list[str] = []
+    points: list[HealthPoints] = []
     dormant = False
+
+    def award(signal: str, earned: float, most: float, why: str | None = None) -> None:
+        # Every scored signal records its points, even zero, so `repo` can show where
+        # the rest went. A signal with no line of its own (a missing Code of Conduct)
+        # used to cost points without saying so.
+        nonlocal score
+        score += earned
+        points.append(HealthPoints(signal=signal, earned=earned, most=most, why=why))
 
     if health.archived or health.disabled:
         health.health_score = 0.0
         health.grade = "F"
         health.warnings = ["Repository is archived or disabled; do not contribute here for GSoC"]
         health.signals = []
+        health.notes = []
+        health.points = []
+        health.capped_by = "Archived or disabled, so it scores 0"
         return health
 
+    pushed = 0.0
     if health.pushed_at:
         days = (datetime.now(UTC) - health.pushed_at.astimezone(UTC)).days
         # A push shows the code is alive, not that anyone reviews outside work; the
         # reply time below measures that, and DORMANT_CAP handles a silent year.
         if days <= 14:
-            score += 16
+            pushed = 16
             signals.append(f"Very recent activity ({days}d since push)")
         elif days <= 45:
-            score += 12
+            pushed = 12
             signals.append(f"Active ({days}d since push)")
         elif days <= 120:
-            score += 6
+            pushed = 6
             signals.append(f"Somewhat active ({days}d since push)")
         elif days <= DORMANT_DAYS:
             warnings.append(f"Stale repository ({days}d since last push)")
@@ -88,65 +103,80 @@ def score_repo_health(health: RepoHealth) -> RepoHealth:
             )
     else:
         warnings.append("Missing push timestamp")
+    award("Recent push", pushed, 16)
 
     def past(text: str) -> str:
         """A pull request figure, marked as old when the repository has gone quiet."""
         return f"Before it went quiet: {text[0].lower()}{text[1:]}" if dormant else text
 
     if health.has_contributing:
-        score += 12
         signals.append("Has a CONTRIBUTING guide")
     else:
         warnings.append("No CONTRIBUTING guide detected; ask maintainers how to start")
+    award("CONTRIBUTING guide", 12 if health.has_contributing else 0, 12)
     if health.has_code_of_conduct:
-        score += 4
         signals.append("Has a Code of Conduct")
-    if health.has_issue_template or health.has_pr_template:
-        score += 4
+    award("Code of Conduct", 4 if health.has_code_of_conduct else 0, 4)
+    templates = health.has_issue_template or health.has_pr_template
+    if templates:
         signals.append("Issue/PR templates guide contributions")
+    award("Issue or PR templates", 4 if templates else 0, 4)
     if health.has_ci:
-        score += 8
         signals.append("CI runs on pull requests")
+    award("CI on pull requests", 8 if health.has_ci else 0, 8)
 
     open_issues = health.open_beginner_issues or 0
     free = open_issues - (health.assigned_beginner_issues or 0)
+    beginner = 0.0
     if open_issues and free > 0:
-        score += 10
+        beginner = 10
         total = f" ({open_issues} open in total)" if free < open_issues else ""
         signals.append(
             f"{free} open '{health.beginner_label}' issue(s) nobody is assigned to{total}"
         )
     elif open_issues:
-        score += 2
+        beginner = 2
         warnings.append(
             f"All {open_issues} open '{health.beginner_label}' issue(s) are already assigned"
         )
     elif health.beginner_label:
-        score += 4
+        beginner = 4
         warnings.append(f"'{health.beginner_label}' label exists but no open issues use it")
+    award(
+        "Open beginner issues",
+        beginner,
+        10,
+        None if health.beginner_label else "no beginner label found",
+    )
 
     # Worth less than the outside merge rate below: most of these PRs come from the
     # core team, and the outside ones are counted again there.
+    merged = 0.0
     if health.merge_rate is not None and health.prs_sampled >= 5:
         if health.merge_rate >= 0.5:
-            score += 8
+            merged = 8
             signals.append(past(f"Healthy merge rate ({health.merge_rate:.0%} of human PRs)"))
         elif health.merge_rate >= 0.25:
-            score += 4
+            merged = 4
             signals.append(past(f"Moderate merge rate ({health.merge_rate:.0%})"))
         else:
             warnings.append(f"Low merge rate ({health.merge_rate:.0%})")
+        award("Merge rate of all human PRs", merged, 8)
+    else:
+        award("Merge rate of all human PRs", 0, 8, "too few closed PRs to score")
 
     rate = health.outsider_merge_rate
     sampled = health.outsider_prs_sampled
     cap = 100.0
+    cap_reason: str | None = None
     if rate is not None and sampled >= MIN_OUTSIDER_SAMPLE:
         unmerged = sampled - round(rate * sampled)
+        outside = 0.0
         if rate >= 0.4:
-            score += 12
+            outside = 12
             signals.append(past(f"Merges outside contributors' PRs ({rate:.0%} of {sampled})"))
         elif rate >= 0.2:
-            score += 6
+            outside = 6
             warnings.append(
                 f"{unmerged} of the last {sampled} outside pull requests were not merged; "
                 "ask on the issue before you start, and expect competition"
@@ -156,18 +186,35 @@ def score_repo_health(health: RepoHealth) -> RepoHealth:
                 f"Rarely merges PRs from outside contributors ({rate:.0%} of {sampled}): "
                 f"{unmerged} of the last {sampled} were not merged"
             )
-        cap = next((limit for below, limit in OUTSIDER_CAPS if rate < below), cap)
-    elif rate is not None and sampled:
-        signals.append(
-            f"Outside PRs merged: {rate:.0%} of {sampled} (too few to score; check recent PRs)"
+        award("Outside merge rate", outside, 12)
+        for below, limit in OUTSIDER_CAPS:
+            if rate < below:
+                cap = limit
+                cap_reason = (
+                    f"Under {below:.0%} of outside pull requests were merged, so the score "
+                    f"stops at {limit:.0f}"
+                )
+                break
+    else:
+        if rate is not None and sampled:
+            notes.append(
+                f"Outside PRs merged: {rate:.0%} of {sampled} (too few to score; check recent PRs)"
+            )
+        award(
+            "Outside merge rate",
+            0,
+            12,
+            f"only {sampled} outside PRs, too few to score"
+            if sampled
+            else "no outside PRs sampled",
         )
     if health.outside_landed_elsewhere:
-        signals.append(
+        notes.append(
             f"{health.outside_landed_elsewhere} closed outside PR(s) landed through a "
             "maintainer's own commit (counted as merged here; GitHub shows them as closed)"
         )
+    award("Different outside authors merged", min(6.0, 2.0 * health.outside_authors_merged), 6)
     if health.outside_authors_merged:
-        score += min(6.0, 2.0 * health.outside_authors_merged)
         when = "" if dormant else " recently"
         signals.append(
             past(f"{health.outside_authors_merged} different outside author(s) merged{when}")
@@ -175,23 +222,25 @@ def score_repo_health(health: RepoHealth) -> RepoHealth:
 
     first = health.median_first_response_hours
     if first is not None and health.first_response_sampled < MIN_REPLY_SAMPLE:
-        signals.append(
+        notes.append(
             f"First human reply on outside PRs: ~{_days_or_hours(first)} (median of only "
             f"{health.first_response_sampled}; not scored)"
         )
         first = None
+    reply = 0.0
+    reply_why: str | None = None
     if first is not None:
         # Time to the first human reply explains most of a PR's lifetime and
         # predicts whether newcomers keep contributing; prefer it over merge time.
         if first <= 24:
-            score += 10
+            reply = 10
             signals.append(
                 past(
                     f"Pull requests from outsiders get a human reply within ~{first:.0f}h (median)"
                 )
             )
         elif first <= 72:
-            score += 6
+            reply = 6
             signals.append(
                 past(
                     f"Pull requests from outsiders get a human reply in ~{first / 24:.0f}d (median)"
@@ -202,62 +251,78 @@ def score_repo_health(health: RepoHealth) -> RepoHealth:
                 f"Pull requests from outsiders wait ~{first / 24:.0f}d for a first human reply (median)"
             )
         if health.median_pr_hours is not None:
-            signals.append(
+            notes.append(
                 past(f"Merged PRs land in ~{_days_or_hours(health.median_pr_hours)} (median)")
             )
     elif health.median_pr_hours is not None:
         if health.median_pr_hours <= 72:
-            score += 10
+            reply = 10
             signals.append(past(f"Merged PRs land fast (~{health.median_pr_hours:.0f}h median)"))
         elif health.median_pr_hours <= 240:
-            score += 5
+            reply = 5
             signals.append(past(f"Merged PRs take ~{health.median_pr_hours / 24:.0f}d (median)"))
         else:
             warnings.append(
                 f"Merged PRs take ~{health.median_pr_hours / 24:.0f}d (median); "
                 "unmerged ones are not counted"
             )
+    else:
+        reply_why = "no reply or merge times measured"
+    award("Time to a first human reply", reply, 10, reply_why)
     newcomers = health.newcomer_committers_last_year
     if newcomers is None:
         # No commit history from ecosyste.ms says nothing about the repository, so
         # score the rest out of what could be read. A year with no commits reads the
         # same way, and DORMANT_CAP already holds that repository down.
-        out_of -= NEWCOMER_POINTS
-        signals.append(
-            "No commit history from ecosyste.ms, so people who landed a single "
-            "commit are left out of the score"
+        notes.append(
+            "ecosyste.ms, a free service that reads public commit histories, has none for "
+            "this repository, so people who landed a single commit are left out of the score"
         )
-    elif health.committers_last_year:
-        if newcomers >= 10:
-            score += NEWCOMER_POINTS
+        points.append(
+            HealthPoints(
+                signal="People who landed a single commit last year",
+                earned=0,
+                most=0,
+                why="no commit history from ecosyste.ms",
+            )
+        )
+    else:
+        newcomer_points = 0.0
+        if health.committers_last_year and newcomers >= 10:
+            newcomer_points = NEWCOMER_POINTS
             signals.append(
                 f"{newcomers} people landed their first and only commit in the last year "
                 f"({health.committers_last_year} committers in total)"
             )
-        elif newcomers >= 3:
-            score += NEWCOMER_POINTS / 2
+        elif health.committers_last_year and newcomers >= 3:
+            newcomer_points = NEWCOMER_POINTS / 2
             signals.append(
                 f"{newcomers} people landed a single commit in the last year "
                 f"({health.committers_last_year} committers in total)"
             )
-        else:
-            signals.append(f"{health.committers_last_year} people committed in the last year")
+        elif health.committers_last_year:
+            notes.append(f"{health.committers_last_year} people committed in the last year")
+        award("People who landed a single commit last year", newcomer_points, NEWCOMER_POINTS)
     if health.bus_factor == 1:
         warnings.append("One person wrote more than half of last year's commits")
 
-    if health.median_outsider_pr_size is not None:
-        signals.append(
-            past(
-                f"Merged outside PRs change ~{health.median_outsider_pr_size} lines (median), "
-                "so focused changes are what land here"
-            )
-        )
+    size = health.median_outsider_pr_size
+    if size is not None:
+        # A median of thousands of lines (notebooks, data) is not a focused change.
+        focused = ", so focused changes are what land here" if size <= FOCUSED_PR_LINES else ""
+        notes.append(past(f"Merged outside PRs change ~{size} lines (median){focused}"))
 
-    if health.license:
-        score += 4
+    if health.license == "Other":
+        # GitHub's name for a license file it cannot match to a known license.
+        notes.append(
+            "GitHub found a license file but cannot tell which license it is; "
+            "read it to check that the code is open source"
+        )
+    elif health.license:
         signals.append(f"License: {health.license}")
     else:
         warnings.append("No license detected")
+    award("License", 4 if health.license else 0, 4)
 
     # Stars carry no points: popularity predicts competition, not acceptance.
     if health.stars < 20:
@@ -265,10 +330,20 @@ def score_repo_health(health: RepoHealth) -> RepoHealth:
     elif health.stars > 50000:
         warnings.append("Very popular repo: beginner issues go fast, expect competition")
 
-    if dormant:
-        cap = min(cap, DORMANT_CAP)
-    health.health_score = round(min(score * 100 / out_of, cap), 1)
+    if dormant and cap > DORMANT_CAP:
+        cap = DORMANT_CAP
+        cap_reason = (
+            f"Nothing was pushed for over {DORMANT_DAYS} days, so the score stops at "
+            f"{DORMANT_CAP:.0f}"
+        )
+    # Out of what could be read: missing ecosyste.ms data leaves its points out.
+    out_of = sum(p.most for p in points)
+    uncapped = score * 100 / out_of
+    health.health_score = round(min(uncapped, cap), 1)
     health.grade = _grade(health.health_score)
     health.signals = signals
     health.warnings = warnings
+    health.notes = notes
+    health.points = points
+    health.capped_by = cap_reason if uncapped > cap else None
     return health

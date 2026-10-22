@@ -129,6 +129,15 @@ class OrgCatalog(BaseModel):
     count: int
 
 
+class HealthPoints(BaseModel):
+    """What one signal added to a repository's health score."""
+
+    signal: str
+    earned: float
+    most: float  # 0 when the signal is left out of the score for lack of data
+    why: str | None = None  # set when the signal lines do not already say it
+
+
 class RepoHealth(BaseModel):
     full_name: str
     url: str
@@ -169,6 +178,10 @@ class RepoHealth(BaseModel):
     grade: str = "F"
     signals: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    # Facts that earn nothing either way, so they get no check mark.
+    notes: list[str] = Field(default_factory=list)
+    points: list[HealthPoints] = Field(default_factory=list)
+    capped_by: str | None = None  # the rule that held the score down, when one did
 
 
 class IssueCandidate(BaseModel):

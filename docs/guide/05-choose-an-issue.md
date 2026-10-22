@@ -54,6 +54,8 @@ A figure that rests on too few PRs is shown but scores nothing, since a handful 
 
 The advice under the grade follows the grade: "Strong candidate" for an A, "Promising, with caveats" for a B, "Risky" for a C or a D, and "Poor fit" for an F.
 
+Under the checks, "Where it lost points" lists each signal that earned less than its most, using the names in the table above, with the reason when the lines above do not give it. It also says when a signal was left out for lack of data, and which rule held the grade down, if one did. A line marked with a dot (·) instead of a check mark is a fact that earns nothing either way, such as a figure based on too few PRs.
+
 "Getting set up" lists the toolchain files found in the repository root, whether a dev container exists (one click in Codespaces or VS Code gets you a working environment), the CONTRIBUTING link, and the chat channels it mentions. Read the README and CONTRIBUTING on GitHub before writing code. A high grade does not guarantee mentoring, and a missing file can mean the guide lives elsewhere. If the repository is archived, look for the project's current repository before continuing.
 
 ```bash

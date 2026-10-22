@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from git_into_gsoc.models import Availability, IssueCandidate, OrgSummary, RepoHealth
 from git_into_gsoc.scoring.health import score_repo_health
 from git_into_gsoc.scoring.issues import score_issue
 from git_into_gsoc.scoring.org_match import canonical, mentions, score_org_match, slot_trend
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_repo_health_rewards_active_welcoming_projects() -> None:
@@ -58,7 +62,12 @@ def test_repo_health_does_not_score_tiny_outsider_samples_or_stars() -> None:
     )
     scored = score_repo_health(few)
     assert not any("Rarely merges" in w for w in scored.warnings)
-    assert any("too few to score" in s for s in scored.signals)
+    # Shown as a plain note, not a check mark: four PRs earn nothing either way.
+    assert any("too few to score" in s for s in scored.notes)
+    assert not any("too few to score" in s for s in scored.signals)
+    outside = next(p for p in scored.points if p.signal == "Outside merge rate")
+    assert (outside.earned, outside.most) == (0, 12)
+    assert outside.why == "only 4 outside PRs, too few to score"
     assert not any("star" in s.lower() for s in scored.signals)
 
 
@@ -219,8 +228,13 @@ def test_a_repo_that_rejects_most_outside_prs_never_gets_an_a() -> None:
 
 def test_pr_size_is_reported_without_telling_people_to_shrink_their_work() -> None:
     scored = score_repo_health(_busy_repo())
-    size = next(s for s in scored.signals if "lines" in s)
+    size = next(s for s in scored.notes if "lines" in s)
     assert "keep yours" not in size
+    assert "focused changes" in size
+    # A median of thousands of lines, as in a repository of notebooks, is not focused.
+    huge = score_repo_health(_busy_repo(median_outsider_pr_size=5070))
+    size = next(s for s in huge.notes if "lines" in s)
+    assert size == "Merged outside PRs change ~5070 lines (median)"
 
 
 def test_beginner_issue_count_says_how_many_are_still_unassigned() -> None:
@@ -304,6 +318,51 @@ def test_health_points_add_up_to_exactly_100() -> None:
         assert scored.health_score == 100 - points, name
 
 
+def test_every_lost_point_is_named() -> None:
+    # A blind beginner run (2026-10-22) saw grade C next to seven check marks: a
+    # missing Code of Conduct or templates cost points without any line saying so.
+    perfect = score_repo_health(_perfect_repo())
+    assert sum(p.most for p in perfect.points) == 100
+    assert all(p.earned == p.most for p in perfect.points)
+    assert perfect.capped_by is None
+    for name, (change, points) in KNOCKOUTS.items():
+        scored = score_repo_health(_perfect_repo(**change))
+        lost = {p.signal: p.most - p.earned for p in scored.points if p.earned < p.most}
+        assert len(lost) == 1, (name, lost)
+        assert sum(lost.values()) == points, name
+
+
+def test_the_guide_lists_every_scored_signal_and_its_points() -> None:
+    # `repo` names signals by the guide's table, so the two must not drift apart.
+    guide = (ROOT / "docs" / "guide" / "05-choose-an-issue.md").read_text(encoding="utf-8")
+    section = guide.split("### How the grade is worked out", 1)[1].split("\n#", 1)[0]
+    table = {
+        name: float(most) for name, most in re.findall(r"^\| ([^|]+?) \| (\d+) \|", section, re.M)
+    }
+    perfect = score_repo_health(_perfect_repo())
+    assert {p.signal: p.most for p in perfect.points} == table
+
+
+def test_a_cap_says_what_held_the_score_down() -> None:
+    rare = score_repo_health(_perfect_repo(outsider_merge_rate=0.1))
+    assert (
+        rare.capped_by == "Under 20% of outside pull requests were merged, so the score stops at 71"
+    )
+    quiet = score_repo_health(_perfect_repo(pushed_at=datetime.now(UTC) - timedelta(days=851)))
+    assert quiet.capped_by == "Nothing was pushed for over 365 days, so the score stops at 57"
+    # A cap above the score held nothing down, so it is not named.
+    low = score_repo_health(_busy_repo(has_contributing=False, has_ci=False, license=None))
+    assert low.health_score < 84 and low.capped_by is None
+
+
+def test_a_license_github_cannot_name_gets_no_check_mark() -> None:
+    scored = score_repo_health(_perfect_repo(license="Other"))
+    assert not any("License" in s for s in scored.signals)
+    assert any("cannot tell which license" in s for s in scored.notes)
+    # A license file is there, so it keeps its points, as the guide's table says.
+    assert scored.health_score == 100
+
+
 def test_missing_commit_data_leaves_newcomers_out_of_the_score() -> None:
     # ecosyste.ms has no commit history for some repositories and is sometimes down.
     # That says nothing about the repository, so it must not cost a grade.
@@ -311,7 +370,12 @@ def test_missing_commit_data_leaves_newcomers_out_of_the_score() -> None:
     assert score_repo_health(_perfect_repo(**missing)).health_score == 100
     no_ci = score_repo_health(_perfect_repo(has_ci=False, **missing))
     assert no_ci.health_score == round(86 * 100 / 94, 1)
-    assert any("ecosyste.ms" in s for s in no_ci.signals)
+    # A gap in someone else's data is a note that says what ecosyste.ms is, not a check.
+    assert any("ecosyste.ms, a free service" in s for s in no_ci.notes)
+    assert not any("ecosyste.ms" in s for s in no_ci.signals)
+    left_out = [p for p in no_ci.points if p.most == 0]
+    assert [p.signal for p in left_out] == ["People who landed a single commit last year"]
+    assert sum(p.most for p in no_ci.points) == 94
     # A measured count of zero is evidence, not missing data.
     none_landed = score_repo_health(_perfect_repo(newcomer_committers_last_year=0))
     assert none_landed.health_score == 94
@@ -418,7 +482,8 @@ def test_a_repository_quiet_for_over_a_year_cannot_look_promising() -> None:
     assert quiet.grade == "D"
     assert quiet.health_score <= 57
     assert quiet.warnings[0].startswith("Nothing has been pushed for 851 days")
-    figures = [s for s in quiet.signals if any(w in s for w in ("merge", "reply", "PRs"))]
+    shown = quiet.signals + quiet.notes
+    figures = [s for s in shown if any(w in s for w in ("merge", "reply", "PRs"))]
     assert len(figures) == 4
     assert figures and all(s.startswith("Before it went quiet: ") for s in figures)
     assert not any("recently" in s for s in quiet.signals)

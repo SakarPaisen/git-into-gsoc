@@ -287,6 +287,8 @@ def gsoc_evaluate_repo(full_name: str) -> str:
     """Will a newcomer's PR land here? Health grade (A-F) with signals and warnings:
     activity, CONTRIBUTING/CoC/templates, CI, open beginner issues, bot-free merge rate,
     outside-contributor merge rate, review speed; plus toolchain/dev-container setup hints.
+    `points` gives what each signal earned out of its most, and `capped_by` the rule that
+    held the score down, so you can say where a grade came from. `notes` earn nothing.
 
     full_name: owner/repo or a GitHub URL (e.g. sympy/sympy)
     """

@@ -817,7 +817,13 @@ class GitHubClient:
         if devcontainer:
             hints.insert(0, "Dev container available: open in Codespaces/VS Code for a ready env")
         if not hints:
-            hints.append("Read README.md and CONTRIBUTING.md before coding")
+            # Naming a file the repository does not have read as a contradiction next
+            # to "No CONTRIBUTING guide detected" (a blind beginner run, 2026-10-22).
+            hints.append(
+                "Read README.md and CONTRIBUTING.md before coding"
+                if path
+                else "Read README.md before coding"
+            )
         beginner = [str(lab.get("name")) for lab in labels if pick_beginner_label([lab])]
         return ContributionGuide(
             repo=full_name,

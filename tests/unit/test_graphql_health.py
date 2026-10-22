@@ -167,7 +167,7 @@ def test_repo_health_prefers_graphql_when_a_token_exists(monkeypatch: pytest.Mon
     assert health.outside_landed_elsewhere == 1
     assert health.outsider_merge_rate == pytest.approx(1.0)
     assert health.outside_authors_merged == 3
-    assert any("landed through a maintainer's own commit" in s for s in health.signals)
+    assert any("landed through a maintainer's own commit" in s for s in health.notes)
     sent = json.loads(graphql.calls[0].request.content)
     assert (
         sent["variables"] == {"owner": "acme", "name": "lib"} and "assignableUsers" in sent["query"]
@@ -176,7 +176,7 @@ def test_repo_health_prefers_graphql_when_a_token_exists(monkeypatch: pytest.Mon
     assert not rest_pulls.called
     assert health.pr_source == "graphql" and health.insiders_known
     assert health.median_first_response_hours == pytest.approx(6, abs=0.1)
-    assert any("human reply" in s for s in health.signals)
+    assert any("human reply" in s for s in health.signals + health.notes)
 
 
 @respx.mock

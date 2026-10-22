@@ -974,6 +974,13 @@ def repo_cmd(
         console.print(f"  [green]✓[/green] {signal}")
     for warning in health.get("warnings") or []:
         console.print(f"  [yellow]![/yellow] {warning}")
+    for note in health.get("notes") or []:
+        console.print(f"  [dim]·[/dim] {note}")
+    lost = _lost_points_lines(health)
+    if lost:
+        console.print("\n[bold]Where it lost points[/bold]")
+        for line in lost:
+            console.print(f"  {line}")
     console.print("\n[bold]Getting set up[/bold]")
     for hint in guide.get("setup_hints") or []:
         console.print(f"  • {hint}")
@@ -981,6 +988,32 @@ def repo_cmd(
         console.print(f"  • Read first: {guide['contributing_url']}")
     if guide.get("communication_channels"):
         console.print(f"  • Channels mentioned: {', '.join(guide['communication_channels'])}")
+    if data.get("tracked"):
+        console.print("\nSaved to your progress. `next` will list new beginner issues opened here.")
+
+
+def _lost_points_lines(health: dict[str, Any]) -> list[str]:
+    """Each signal that earned less than its most, then what was left out or held it down."""
+    points = health.get("points") or []
+    scored = [p for p in points if p["most"]]
+    missed = sorted(
+        (p for p in scored if p["earned"] < p["most"]), key=lambda p: p["earned"] - p["most"]
+    )
+    lines = [
+        f"{p['signal']}: {p['earned']:g} of {p['most']:g}" + (f" ({p['why']})" if p["why"] else "")
+        for p in missed
+    ]
+    out_of = sum(p["most"] for p in scored)
+    for p in points:
+        if not p["most"]:
+            earned = sum(q["earned"] for q in scored)
+            lines.append(
+                f"Left out: {p['signal'].lower()} ({p['why']}), so {earned:g} of {out_of:g} "
+                f"points counts as {earned * 100 / out_of:.0f} of 100"
+            )
+    if health.get("capped_by"):
+        lines.append(f"Held down: {health['capped_by']}")
+    return lines
 
 
 def _ci_environment_lines(env: dict[str, Any]) -> list[str]:
