@@ -586,3 +586,14 @@ def test_an_experienced_person_is_asked_to_check_eligibility_first() -> None:
     assert any("GSoC is for students and beginners to open source" in s["step"] for s in path)
     newcomer = learning_path(build_profile(technologies=["go"], experience="new"), [])
     assert not any("Check that you can take part" in s["step"] for s in newcomer)
+
+
+def test_an_interest_widens_to_narrower_subjects_but_not_to_skills() -> None:
+    # A launch audit saw `repos ML4SCI` say "About Jupyter, which you care about" to
+    # someone who picked "science and data": Jupyter sits under data science, as a skill.
+    from git_into_gsoc.matching.ideas import wanted_domains
+
+    wanted = wanted_domains(build_profile(interests=["data"]))
+    assert "data science" in wanted
+    assert "jupyter" not in wanted and "pandas" not in wanted
+    assert "computer vision" in wanted_domains(build_profile(interests=["machine learning"]))
