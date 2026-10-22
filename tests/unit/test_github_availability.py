@@ -1,3 +1,6 @@
+"""Whether an issue is free: the timeline rules, claim phrasings from real comments, releases,
+grants, and the issue search that uses them."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -523,10 +526,36 @@ def test_an_open_pr_in_another_repository_named_in_a_comment_counts() -> None:
 
 def test_a_pr_from_another_repository_is_named_with_its_repository() -> None:
     issue = _issue(number=3, html_url="https://github.com/acme/app/issues/3")
-    other = _pr(12, "open", "dev")
-    other["source"]["issue"]["html_url"] = "https://github.com/dev/fork-tool/pull/12"
-    found = assess_issue(issue, [other], now=NOW)
-    assert found.reason == "Open PR dev/fork-tool#12 by @dev references it"
+    # A fork keeps the project's name, and a sibling repository has the same owner:
+    # their pull requests can fix the issue.
+    for source in (
+        "https://github.com/dev/app/pull/12",
+        "https://github.com/acme/app-docs/pull/12",
+    ):
+        other = _pr(12, "open", "dev")
+        other["source"]["issue"]["html_url"] = source
+        found = assess_issue(issue, [other], now=NOW)
+        where = source.split("github.com/")[1].split("/pull")[0]
+        assert found.reason == f"Open PR {where}#12 by @dev references it", source
+
+
+def test_a_pr_in_an_unrelated_project_that_mentions_the_issue_is_not_a_fix() -> None:
+    # This tool's own repository once named a CircuitVerse issue in a merged pull
+    # request, and `issue` then said "A merged PR references this issue; it may already
+    # be partly fixed".
+    issue = _issue(
+        number=1411, html_url="https://github.com/CircuitVerse/cv-frontend-vue/issues/1411"
+    )
+    mention = _pr(154, "closed", "anandkaranubc", merged=True)
+    mention["source"]["issue"]["html_url"] = (
+        "https://github.com/anandkaranubc/git-into-gsoc/pull/154"
+    )
+    mention["source"]["issue"]["repository"] = {"full_name": "anandkaranubc/git-into-gsoc"}
+    found = assess_issue(issue, [mention], now=NOW)
+    assert found.availability == Availability.AVAILABLE
+    assert found.linked_prs == []
+    assert not any("may already be partly fixed" in c for c in found.caveats)
+    assert any("anandkaranubc/git-into-gsoc#154" in c for c in found.caveats)
 
 
 @pytest.mark.parametrize(
@@ -551,8 +580,8 @@ def test_a_pr_from_another_repository_is_named_with_its_repository() -> None:
     ],
 )
 def test_labels_that_hold_an_issue_back_count_however_they_are_spelled(label: str) -> None:
-    # Measured on 24,779 labels from the top repositories of 153 GSoC organizations
-    # (2026-10-21). An App Inventor issue labelled "status: needs discussion" read
+    # Measured on 24,779 labels from the top repositories of 144 GSoC organizations'
+    # GitHub owners (2026-10-21). An App Inventor issue labelled "status: needs discussion" read
     # "available" because only the exact name "needs discussion" counted.
     found = assess_issue(_issue(labels=[{"name": "help wanted"}, {"name": label}]), [], now=NOW)
     assert found.availability == Availability.NOT_OPEN
@@ -864,3 +893,154 @@ def test_a_second_person_asking_to_work_together_is_a_claim() -> None:
     # one's "we could work together" was not seen.
     assert is_claim("Sure, if possible we could work together @spyke7. Thank you.")
     assert not is_claim("Could you work together with the docs team on this?")
+
+
+def test_claims_from_a_fifth_sample_of_new_organizations() -> None:
+    # Forms from the tuning half of a fifth sample (568 comments from 21 organizations
+    # never sampled before, labelled blind, 2026-10-22).
+    claims = [
+        "I shall work on it",
+        "may I address this issue?",
+        "please let me work on this",
+        "Please assign it.",
+        "could you please add me as a co-assignee",
+        "I can take up this issue",
+        "I will open PR soon.",
+        "I have just implemented it and I'm raising the PR.",
+        "I started implementing the requested mode",
+        "taking this up as discussed on Slack!",
+        "I have self assigned this issue.",
+        "I have made minimal changes to fix this.",
+        "My work is ready for PR",
+        "Can we both collab?",
+        "I will take a look into this issue.",
+        "I am interested",
+        "@openwisp-companion assign",
+        "C:/Program Files/Git/assign",  # Git Bash on Windows rewrote "/assign"
+    ]
+    for text in claims:
+        assert is_claim(text), text
+    not_claims = [
+        "Please assign it to someone who knows the parser.",
+        "I am interested in how this works internally.",
+        "Can we both agree this is a duplicate?",
+        "I will take a look at the logs tomorrow and report the error.",
+        "@reviewer please take another look",
+    ]
+    for text in not_claims:
+        assert not is_claim(text), text
+
+
+def _merged_pr(number: int, body: str, *, merged_days_ago: int = 1) -> dict[str, Any]:
+    event = _pr(number, "closed", merged=True)
+    event["source"]["issue"]["body"] = body
+    event["source"]["issue"]["title"] = "Remove dead config"
+    event["source"]["issue"]["pull_request"]["merged_at"] = _iso(merged_days_ago)
+    return event
+
+
+def test_a_merged_pr_that_says_it_fixes_the_issue_makes_it_likely_taken() -> None:
+    # mofa's issue 671 stayed open for seven months after "- Fixes issue #671" was
+    # merged: GitHub closes issues only for "Fixes #671". `recommend` showed it as free.
+    issue = _issue(number=671, html_url="https://github.com/acme/lib/issues/671")
+    found = assess_issue(issue, [_merged_pr(672, "Summary\n- Fixes issue #671\n")], now=NOW)
+    assert found.availability == Availability.LIKELY_TAKEN
+    assert found.reason.startswith("Merged PR #672 says it fixes this, though the issue is still")
+    assert not any("partly fixed" in c for c in found.caveats)
+    # A merged PR that only mentions the issue is still a caveat, as before.
+    mention = assess_issue(issue, [_merged_pr(673, "Related to #671.")], now=NOW)
+    assert mention.availability == Availability.AVAILABLE
+    assert any("partly fixed" in c for c in mention.caveats)
+
+
+def test_which_words_say_a_pr_fixes_an_issue() -> None:
+    from git_into_gsoc.github.availability import says_it_fixes
+
+    for text in (
+        "Fixes #671",
+        "fixes issue #671",
+        "Closes acme/lib#671",
+        "Resolved: #671",
+        "Fix for #671's crash",
+        "fixes https://github.com/acme/lib/issues/671",
+    ):
+        assert says_it_fixes(text, "acme/lib", 671), text
+    for text in (
+        "Related to #671",
+        "Fixes #6710",
+        "Fixes #12. Mentioned in #671",
+        "See #671; this fixes the docs",
+        "Fixes #671",
+        "",
+    ):
+        number = 999 if text == "Fixes #671" else 671
+        assert not says_it_fixes(text, "acme/lib", number), text
+
+
+def test_a_real_issue_fixed_by_an_unlinked_merge_is_likely_taken() -> None:
+    # Recorded from mofa's issue 671 (names replaced): "- Fixes issue #671" was merged
+    # in March 2026, GitHub never closed the issue, and `recommend` offered it as free.
+    import json
+    from pathlib import Path
+
+    data = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "issue_fixed_by_unlinked_merge.json").read_text()
+    )
+    found = assess_issue(data["issue"], data["timeline"], now=NOW)
+    assert found.availability == Availability.LIKELY_TAKEN
+    assert "Merged PR #672 says it fixes this" in found.reason
+
+
+def test_a_sibling_repos_bare_issue_number_is_its_own_issue() -> None:
+    # A frontend pull request saying "Fixes #671" fixes the frontend's issue 671; it
+    # must name "acme/lib#671" or link the issue to count for acme/lib.
+    from git_into_gsoc.github.availability import says_it_fixes
+
+    assert not says_it_fixes("Fixes #671", "acme/lib", 671, pr_repo="acme/frontend")
+    assert says_it_fixes("Fixes acme/lib#671", "acme/lib", 671, pr_repo="acme/frontend")
+    assert not says_it_fixes("Fixes other/lib#671", "acme/lib", 671, pr_repo="acme/lib")
+    issue = _issue(number=671, html_url="https://github.com/acme/lib/issues/671")
+    sibling = _merged_pr(90, "Fixes #671")
+    sibling["source"]["issue"]["html_url"] = "https://github.com/acme/frontend/pull/90"
+    sibling["source"]["issue"]["repository"] = {"full_name": "acme/frontend"}
+    assert assess_issue(issue, [sibling], now=NOW).availability == Availability.AVAILABLE
+
+
+def test_a_fix_merged_before_the_issue_was_opened_does_not_count() -> None:
+    issue = _issue(
+        number=671, created_at=_iso(10), html_url="https://github.com/acme/lib/issues/671"
+    )
+    old = _merged_pr(500, "Fixes #671", merged_days_ago=40)
+    found = assess_issue(issue, [old], now=NOW)
+    assert found.availability == Availability.AVAILABLE
+    assert not any(p.fixes for p in found.linked_prs)
+
+
+def test_a_comment_with_a_plan_is_a_claim() -> None:
+    # This project's good-first issues ask people to "comment with what you plan to do";
+    # a comment doing exactly that read as no claim (launch audit, 0.23.0). Paraphrased:
+    plan = (
+        "﻿## Planned change\n\nThe guide uses four terms without explaining them. "
+        "I will add one plain-language sentence at the first use of each:\n\n- **trailer**"
+    )
+    assert is_claim(plan)
+    assert is_claim("## My plan\n\nKeep the fix to one file.")
+    assert is_claim("I'll remove the `-Werror` flag and add a test.")
+    assert is_claim("I will replace strict string matching with a parser.")
+    # A plan someone else wrote, quoted, or a question, is not.
+    assert not is_claim("> I will add a check\n\nWho wrote this?")
+    assert not is_claim("Will you add a changelog entry?")
+    timeline = [_comment("dana", plan, 2)]
+    assert assess_issue(_issue(), timeline, now=NOW).availability == Availability.CLAIMED
+
+
+def test_a_plan_heading_padded_with_spaces_is_read_quickly() -> None:
+    # A stranger's comment is untrusted input: "## Plan" plus 50,000 spaces and a letter
+    # once made the heading pattern backtrack over every split of the spaces.
+    import time
+
+    start = time.perf_counter()
+    assert not is_claim("## Plan" + " " * 50_000 + "x")
+    assert not is_claim("## Plan" + " " * 50_000 + ":" + " " * 50_000 + "x")
+    assert time.perf_counter() - start < 1.0
+    assert is_claim("## Plan:  \n\nShip the fix in one file.")

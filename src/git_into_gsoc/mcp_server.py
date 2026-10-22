@@ -1,4 +1,10 @@
-"""MCP server exposing git-into-gsoc intelligence tools."""
+"""The MCP server: each tool is a thin wrapper over one GSoCToolkit method or
+guidance function.
+
+The tool docstrings are the descriptions every assistant reads before it decides
+what to call, so they are written for models. Change them only with
+before-and-after assistant runs, as the skill text is.
+"""
 
 from __future__ import annotations
 
@@ -11,13 +17,14 @@ from typing import Any, TypeVar
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ClientCapabilities, ElicitationCapability, ToolAnnotations
+from mcp.types import ClientCapabilities, ElicitationCapability, Icon, ToolAnnotations
 from pydantic import BaseModel, Field
 
 from git_into_gsoc import __version__
 from git_into_gsoc.config import PROJECT_URL
 from git_into_gsoc.errors import GigError
 from git_into_gsoc.guidance import ANTI_SPAM_RULES, OFFICIAL_SOURCES, journey_overview
+from git_into_gsoc.install.distribution import ICONS, SHORT_DESCRIPTION
 from git_into_gsoc.models import JourneyPhase, LogEntry
 from git_into_gsoc.onboarding import TOPIC_CHOICES
 from git_into_gsoc.service import GSoCToolkit
@@ -28,7 +35,9 @@ mcp = MCPServer(
     name="git-into-gsoc",
     title="git-into-gsoc",
     version=__version__,
+    description=SHORT_DESCRIPTION,
     website_url=PROJECT_URL,
+    icons=[Icon.model_validate(icon) for icon in ICONS],
     # Some clients keep only the start of this text (Codex asks for the first 512
     # characters to stand on their own), so the safety rules come first.
     instructions=(
@@ -85,6 +94,7 @@ _toolkit: GSoCToolkit | None = None
 
 
 def toolkit() -> GSoCToolkit:
+    """One GSoCToolkit per server process, created on first use."""
     global _toolkit
     if _toolkit is None:
         _toolkit = GSoCToolkit()
@@ -225,7 +235,9 @@ def gsoc_org_details(name: str, year: int = 0) -> str:
     """Full profile for one org: ideas page, contributor guide, channels, GitHub orgs,
     projects per year, and recent accepted project titles. Accepts the full name or a
     whole word of it ("mailman"); a word that fits several orgs returns their names to
-    choose from, and an unknown name returns close matches in did_you_mean."""
+    choose from, and an unknown name returns close matches in did_you_mean.
+    `statement_on_file` is what the monthly check found the org said about the coming
+    year (also in issue bodies, which the live `gsoc_posts` search misses); give its date."""
     return _dump(toolkit().org_details(name, year=year or None))
 
 
@@ -287,6 +299,8 @@ def gsoc_evaluate_repo(full_name: str) -> str:
     """Will a newcomer's PR land here? Health grade (A-F) with signals and warnings:
     activity, CONTRIBUTING/CoC/templates, CI, open beginner issues, bot-free merge rate,
     outside-contributor merge rate, review speed; plus toolchain/dev-container setup hints.
+    `points` gives what each signal earned out of its most, and `capped_by` the rule that
+    held the score down, so you can say where a grade came from. `notes` earn nothing.
 
     full_name: owner/repo or a GitHub URL (e.g. sympy/sympy)
     """
@@ -750,6 +764,110 @@ def weekly_checkin_prompt() -> str:
         "If I have been stuck for more than a few days without asking anyone, call gsoc_draft with "
         "kind=question and help me ask in the project's public channel."
     )
+
+
+# Names assistants guess for a parameter, mapped to the ones a tool may really take; the
+# first that the tool has wins. A real Codex run (2026-10-22) sent gsoc_org_details
+# {"org": ...} three times, and gsoc_search_orgs {"tech": "rust"}, which the SDK
+# silently dropped, so the search ran with no technology at all.
+_ARGUMENT_GUESSES: dict[str, tuple[str, ...]] = {
+    "tech": ("technologies", "skills", "language"),
+    "techs": ("technologies", "skills", "language"),
+    "technology": ("technologies", "skills", "language"),
+    "tech_stack": ("technologies", "skills"),
+    "stack": ("technologies", "skills"),
+    "languages": ("technologies", "language", "skills"),
+    "lang": ("language", "technologies"),
+    "skills": ("technologies",),
+    "topic": ("topics", "interests"),
+    "interest": ("interests", "topics"),
+    "interests": ("topics",),
+    "org": ("name",),
+    "organization": ("name", "org"),
+    "organisation": ("name", "org"),
+    "org_name": ("name", "org"),
+    "name": ("org",),
+    "repo": ("full_name",),
+    "repository": ("full_name", "repo"),
+    "max_results": ("limit",),
+}
+
+
+_Model = TypeVar("_Model", bound=BaseModel)
+
+
+# Parameters the tools document as comma-separated lists; a list sent for one of them is
+# joined. Any other text parameter holds one value.
+_LIST_PARAMETERS = frozenset({"technologies", "topics", "interests", "skills"})
+
+
+def _tolerant_arguments(tool_name: str, model: type[_Model]) -> type[_Model]:
+    """An argument model that maps guessed names, joins lists, and names unknown keys.
+
+    Lists become the comma-separated strings the tools document. Any other unknown key
+    is an error that lists the real parameters, so the assistant corrects the call
+    instead of getting results that quietly ignored it.
+    """
+    from pydantic import model_validator
+
+    fields = model.model_fields
+    text_fields = {
+        name for name, info in fields.items() if info.annotation in (str, str | None, "str")
+    }
+
+    class Arguments(model):  # type: ignore[valid-type, misc]
+        @model_validator(mode="before")
+        @classmethod
+        def _normalize(cls, data: Any) -> Any:
+            if not isinstance(data, dict):
+                return data
+            out: dict[str, Any] = {}
+            unknown: list[str] = []
+            for key, value in data.items():
+                target = key
+                if key not in fields:
+                    target = next(
+                        (
+                            t
+                            for t in _ARGUMENT_GUESSES.get(key, ())
+                            if t in fields and t not in data
+                        ),
+                        "",
+                    )
+                    if not target:
+                        unknown.append(key)
+                        continue
+                if target in text_fields and isinstance(value, str) and value.startswith("["):
+                    try:  # a JSON list sent as a string, which some clients do
+                        parsed = json.loads(value)
+                    except ValueError:
+                        parsed = None
+                    if isinstance(parsed, list):
+                        value = parsed
+                if target in text_fields and isinstance(value, list | tuple):
+                    if target in _LIST_PARAMETERS:
+                        value = ", ".join(str(item) for item in value)
+                    elif len(value) == 1:
+                        value = str(value[0])
+                    else:
+                        raise ValueError(
+                            f"{tool_name} takes one value for {target!r}, not a list of "
+                            f"{len(value)}; call it once for each."
+                        )
+                out[target] = value
+            if unknown:
+                raise ValueError(
+                    f"{tool_name} does not take {', '.join(map(repr, unknown))}. "
+                    f"Its parameters are: {', '.join(fields)}."
+                )
+            return out
+
+    Arguments.__name__ = model.__name__
+    return Arguments
+
+
+for _tool in mcp._tool_manager.list_tools():
+    _tool.fn_metadata.arg_model = _tolerant_arguments(_tool.name, _tool.fn_metadata.arg_model)
 
 
 # The SDK logs at INFO; httpx then logs every request URL, search terms included, into

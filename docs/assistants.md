@@ -82,6 +82,13 @@ Choose one:
 
 Installed plugins are listed in the Extensions view under `@agentPlugins`, where you can manage or remove them. To remove a server added with the button, run **MCP: Open User Configuration** and delete the `git-into-gsoc` entry.
 
+## Visual Studio (GitHub Copilot, Windows)
+
+Visual Studio 2026, or Visual Studio 2022 version 17.14 or newer, adds the server with the Visual Studio button below. It asks you to confirm, then runs the newest release with uv. The button adds the server only, not the skill.
+
+- **Update:** the server checks PyPI and runs the newest release each time it starts.
+- **Remove:** delete the `git-into-gsoc` entry from the `.mcp.json` file that lists it. For servers in every solution, that is `%USERPROFILE%\.mcp.json`.
+
 ## Cursor
 
 Run `git-into-gsoc setup` after the [one-line installer](guide/02-install.md). This is the route we test, and it gives Cursor both the skill and the server. Or use the Cursor button below for the server alone. Cursor asks you to confirm, then adds it to `~/.cursor/mcp.json`. To add the skill too, run `npx skills add anandkaranubc/git-into-gsoc -g -a cursor`.
@@ -118,7 +125,10 @@ Run `git-into-gsoc setup` after the [one-line installer](guide/02-install.md). I
 
 ## Claude Desktop (without the plugin)
 
-Every [release](https://github.com/anandkaranubc/git-into-gsoc/releases/latest) has a `git-into-gsoc.mcpb` file, an MCP bundle. Download it and open it, or drag it into Claude Desktop's Settings, Extensions. A bundle does not update itself: install the new file from a later release to update.
+Every [release](https://github.com/anandkaranubc/git-into-gsoc/releases/latest) has a `git-into-gsoc.mcpb` file, an MCP bundle. [Download the newest one](https://github.com/anandkaranubc/git-into-gsoc/releases/latest/download/git-into-gsoc.mcpb) and open it, or drag it into Claude Desktop's Settings, Extensions. Claude Desktop shows what it installs and asks you to confirm. It also offers an optional GitHub token field; leave it empty unless you hit GitHub's limit of 60 requests an hour.
+
+- **Update:** a bundle does not update itself. Download the newest file again and open it.
+- **Remove:** Settings, Extensions, then uninstall `git-into-gsoc`.
 
 ## Any other assistant
 
@@ -126,17 +136,17 @@ Most assistants read skills from `~/.agents/skills` and accept MCP servers in a 
 
 ```bash
 npx skills add anandkaranubc/git-into-gsoc -g
-npx add-mcp "uvx git-into-gsoc@latest mcp" --name git-into-gsoc
+npx add-mcp "uvx git-into-gsoc@latest mcp" --name git-into-gsoc -g
 ```
 
-The first copies the skill; the second asks which assistants to add the server to. Both need [Node.js](https://nodejs.org/). Kiro also has a button below.
+The first copies the skill; the second asks which assistants to add the server to. `-g` makes both work in every folder; without it they set up only the folder you run them in. Both need [Node.js](https://nodejs.org/). Kiro and Visual Studio also have buttons below, and the [project site](https://anandkaranubc.github.io/git-into-gsoc/) has one-click links for Goose and Raycast. Those two follow each app's documented link format; we have not tested them in the apps.
 
 ## One-click buttons
 
-These add only the MCP server. They run the newest release from [PyPI](https://pypi.org/project/git-into-gsoc/) with `uvx git-into-gsoc@latest mcp`, so they need only uv. uv checks for a newer release each time the assistant starts the server, so it stays current. For a server that also starts offline, use a plugin or `git-into-gsoc setup` instead.
+These add only the MCP server. Each opens a web page that hands the server to the app, and the app asks you to confirm. Most run the newest release from [PyPI](https://pypi.org/project/git-into-gsoc/) with `uvx git-into-gsoc@latest mcp`, so they need only uv. uv checks for a newer release each time the assistant starts the server, so it stays current. The Claude Desktop button downloads the newest release's bundle instead; see [Claude Desktop](#claude-desktop-without-the-plugin). For a server that also starts offline, use a plugin or `git-into-gsoc setup` instead.
 
 <!-- generated:install-links -->
-[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=git-into-gsoc&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJnaXQtaW50by1nc29jQGxhdGVzdCIsIm1jcCJdfQ%3D%3D) [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=git-into-gsoc&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=git-into-gsoc&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D&quality=insiders) [![Add to Kiro](https://img.shields.io/badge/Kiro-Add_server-7138CC?style=flat-square&logo=kiro&logoColor=white)](https://kiro.dev/launch/mcp/add?name=git-into-gsoc&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=git-into-gsoc&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJnaXQtaW50by1nc29jQGxhdGVzdCIsIm1jcCJdfQ%3D%3D) [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=git-into-gsoc&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=git-into-gsoc&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D&quality=insiders) [![Add to Kiro](https://kiro.dev/images/add-to-kiro.svg)](https://kiro.dev/launch/mcp/add?name=git-into-gsoc&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D) [![Install in Visual Studio](https://img.shields.io/badge/Visual_Studio-Install_server-5C2D91?style=flat-square&logo=visualstudio&logoColor=white)](https://vs-open.link/mcp-install?%7B%22name%22%3A%22git-into-gsoc%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D) [![Download for Claude Desktop](https://img.shields.io/badge/Claude_Desktop-Download_extension-D97757?style=flat-square&logo=claude&logoColor=white)](https://github.com/anandkaranubc/git-into-gsoc/releases/latest/download/git-into-gsoc.mcpb)
 <!-- /generated:install-links -->
 
 ## Plugin or setup?
@@ -151,20 +161,37 @@ These add only the MCP server. They run the newest release from [PyPI](https://p
 
 Use one route per assistant. Setup skips an assistant that already has the plugin, so you never get the server twice.
 
+## Set up by hand
+
+You only need this when setup could not write a file for your assistant, or you want to see the configuration. The server command is the path that `git-into-gsoc setup` and `doctor` print, for example `/home/you/.local/bin/git-into-gsoc mcp` or, from a copy of the code, `/absolute/path/to/git-into-gsoc/.venv/bin/git-into-gsoc mcp`. Use the full path, not a terminal alias. On Windows use the full path to `git-into-gsoc.exe`; JSON paths need doubled backslashes or forward slashes.
+
+| Assistant | What setup writes | Manual equivalent |
+|---|---|---|
+| Cursor | `~/.cursor/mcp.json` (or `.cursor/mcp.json` in the project) | Add `"git-into-gsoc": {"command": "<path>", "args": ["mcp"]}` under `mcpServers`; see [Cursor's MCP documentation](https://cursor.com/docs/mcp) |
+| Claude Code | `claude mcp add --scope user --transport stdio git-into-gsoc -- <path> mcp`, or `.mcp.json` in the project | Run that command yourself; `claude mcp list` shows the result. See [Claude Code's MCP documentation](https://code.claude.com/docs/en/mcp). Claude Desktop has its own settings; supply the same command and `mcp` argument there |
+| Codex | `[mcp_servers."git-into-gsoc"]` in `~/.codex/config.toml` (or `.codex/config.toml` in a project you trust), with `env_vars` so your token reaches the server and a 60-second start timeout | `codex mcp add git-into-gsoc -- <path> mcp`; see [Codex's MCP documentation](https://learn.chatgpt.com/docs/extend/mcp). Running `codex mcp add` again drops the extra lines |
+| Gemini CLI | `~/.gemini/settings.json` (or `.gemini/settings.json` in the project), with token variables named in `env` because Gemini CLI hides them otherwise | `gemini mcp add -s user git-into-gsoc <path> mcp` (no `--` before the path); see [Gemini CLI's MCP documentation](https://geminicli.com/docs/tools/mcp-server/) |
+| Antigravity | `~/.gemini/config/mcp_config.json` (or `.agents/mcp_config.json` in the project) | `agy mcp add git-into-gsoc -- <path> mcp`; see [Antigravity's MCP documentation](https://antigravity.google/docs/mcp) |
+| Windsurf (Devin Desktop) | `~/.config/devin/mcp_config.json`, or `~/.codeium/windsurf/mcp_config.json` for Windsurf before it was renamed (or `.devin/mcp_config.json` in the project) | Same `mcpServers` shape as Cursor; see [Devin's MCP documentation](https://docs.devin.ai/cli/extensibility/mcp/configuration) |
+| VS Code and Copilot CLI | `~/.copilot/mcp-config.json`, which VS Code's Copilot sessions and Copilot CLI both read (or `.vscode/mcp.json` in the project) | `copilot mcp add git-into-gsoc -- <path> mcp`, or `code --add-mcp '{"name":"git-into-gsoc","command":"<path>","args":["mcp"]}'` |
+
+The skill goes into one shared folder, `~/.agents/skills`, plus `~/.claude/skills` for Claude Code and `~/.gemini/config/skills` for Antigravity; the [command reference](cli.md#setup-and-maintenance) lists what each scope writes. Restart the assistant after any change.
+
 ## What we test
 
-`scripts/check_agents.py` installs git-into-gsoc into each assistant command it finds, the way that assistant's users would. It uses a throwaway home folder, signs in nowhere, and calls no model. Then it checks that the assistant can start the server. Buttons cannot be clicked in a script, so for those it writes exactly what the app writes after you confirm, and lets the app start the server. CI runs it on Linux on every change to the files these assistants read, and weekly with each assistant's newest release, installing from GitHub.
+`scripts/check_agents.py` installs git-into-gsoc into each assistant command it finds, the way that assistant's users would. It uses a throwaway home folder, signs in nowhere, and calls no model. Then it checks that the assistant can start the server. Before installing from a checkout, it runs each format's own validator where one exists. Buttons cannot be clicked in a script, so for those it writes exactly what the app writes after you confirm, and lets the app start the server. CI runs it on Linux on every change to the files these assistants read, and weekly with each assistant's newest release, installing from GitHub.
 
 | Assistant | What is checked |
 |---|---|
 | Claude Code | Plugin and setup: the server connects |
 | Codex | Plugin and setup: the server answers, from the plugin's own folder |
 | Gemini CLI | Extension and setup: the server connects |
-| Copilot CLI | Plugin and setup: the server is registered. Copilot starts servers only for a signed-in session, so CI cannot start it; a signed-in check on 2026-10-21 (no prompt sent) showed Copilot launching the plugin's server from the plugin folder, and that command answering with 25 tools |
+| Copilot CLI | Plugin and setup: Copilot registers the server from its own manifest, and the exact command it registered answers. Copilot starts servers only for a signed-in session, so the check starts that command itself |
 | Antigravity | Plugin and setup: the converted plugin's server answers |
 | Cursor | The button's config and setup: Cursor's agent CLI starts the server and lists its tools |
 | VS Code | The button's config: VS Code accepts it and the server answers |
-| Claude Desktop | The bundle, unpacked and started the way Desktop runs it |
+| Visual Studio | Not in CI, because Visual Studio runs only on Windows. A test decodes the button's link, and its redirect to Visual Studio was checked on 2026-10-22 |
+| Claude Desktop | The bundle passes the MCP bundle validator, then is unpacked and started the way Desktop runs it |
 
 Not checked automatically: the click itself in each app, VS Code's Install Plugin From Source, and Devin Desktop. Each follows its vendor's documented format. Please [report a problem](https://github.com/anandkaranubc/git-into-gsoc/issues) if one does not work for you.
 

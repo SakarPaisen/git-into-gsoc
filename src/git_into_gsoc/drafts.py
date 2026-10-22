@@ -11,7 +11,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from git_into_gsoc.text import straight_quotes
+from git_into_gsoc.github.availability import CONTESTED_MIN_CLAIMANTS
+from git_into_gsoc.text import clean_untrusted, straight_quotes
 
 DRAFT_KINDS = ("intro", "question", "claim", "pr", "review-reply", "status", "final")
 
@@ -170,7 +171,9 @@ _CONVENTION_PATTERNS = [
     (
         "no_assignment",
         re.compile(
-            r"\b(?:we )?do(?:es)? not assign|don't assign|not assign(?:ed)? issues|no (?:need to )?(?:ask for )?assign",
+            # CircuitVerse: "Start working immediately - no need to wait for assignment".
+            r"\b(?:we )?do(?:es)? not assign|don't assign|not assign(?:ed)? issues|"
+            r"no (?:need to )?(?:ask for |wait for |be )?assign",
             re.I,
         ),
     ),
@@ -178,13 +181,33 @@ _CONVENTION_PATTERNS = [
         "command",
         re.compile(r"(?<![\w/])(/assign(?:-me)?|\.take(?:-issue)?|/take|@\w+bot claim)\b", re.I),
     ),
+    # OpenMRS: "claim the issue by clicking the "Claim Issue" button" in JIRA.
+    ("claim_by", re.compile(r"\bclaim (?:the|an|this) issue by ([^.\n]{3,80})", re.I)),
+    # The p5.js web editor: "You have been assigned to the issue" before you start.
+    (
+        "wait_assigned",
+        re.compile(
+            r"\byou (?:have been|are|must be|should be) assigned (?:to )?the issue\b|"
+            r"(?<!need to )(?<!not )(?<!n't )\bwait (?:until|to be|for) (?:a maintainer )?(?:to )?assign",
+            re.I,
+        ),
+    ),
     (
         "comment",
         re.compile(
             r"\b(leave|post|add) a comment\b.*\b(intention|working on|claim|interest)", re.I
         ),
     ),
-    ("comment", re.compile(r"\bcomment (?:on|in) the issue\b", re.I)),
+    # Only when the same sentence is about claiming: CircuitVerse's "Getting Help" list
+    # says "Comment on the issue/PR with @username", which is how to ask for help.
+    (
+        "comment",
+        re.compile(
+            r"\bcomment (?:on|in) the issue\b(?=[^.\n]{0,100}\b(?:work(?:ing)? on|assign|claim|"
+            r"take|pick))",
+            re.I,
+        ),
+    ),
 ]
 
 
@@ -194,9 +217,28 @@ def claim_convention(text: str) -> dict[str, str]:
     for kind, pattern in _CONVENTION_PATTERNS:
         match = pattern.search(text)
         if match:
-            found = match.group(1) if match.groups() else match.group(0)
-            return {"kind": kind, "text": found.strip()}
+            if kind == "comment":
+                # The whole sentence, not the verb the pattern captured ("Add").
+                found = _sentence_at(text, match.start(), match.end())
+            else:
+                found = match.group(1) if match.groups() else match.group(0)
+            # Strangers wrote this, and it is quoted in rules an assistant reads.
+            found = " ".join(clean_untrusted(found, limit=200).split())
+            return {"kind": kind, "text": found.strip().rstrip(".")}
     return {"kind": "unknown", "text": ""}
+
+
+# The end of a sentence, with any closing quote or markdown after it ("issue".** Add).
+_SENTENCE_END = re.compile(r"[.!?][*_`\"')\]]*(?=\s|$)|\n")
+
+
+def _sentence_at(text: str, start: int, end: int) -> str:
+    """The sentence or list item around text[start:end], without markdown."""
+    left = max((m.end() for m in _SENTENCE_END.finditer(text, 0, start)), default=0)
+    right = _SENTENCE_END.search(text, end)
+    sentence = text[left : right.start() if right else len(text)]
+    sentence = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s+", "", sentence)
+    return re.sub(r"[*_`]+", "", sentence).strip()
 
 
 def _intro(ctx: dict[str, Any]) -> str:
@@ -231,10 +273,21 @@ def _claim(ctx: dict[str, Any]) -> str:
     ref = f"{issue.get('repo')}#{issue.get('number')}" if issue.get("number") else "<owner/repo#N>"
     files = ", ".join(ctx.get("files") or []) or "<file or function>"
     convention = ctx.get("claim_convention") or {}
+    earlier = issue.get("earlier_claims") or []
+    opening = "I'd like to work on this."
+    if earlier and (issue.get("earlier_claim_count") or len(earlier)) < CONTESTED_MIN_CLAIMANTS:
+        # One or two people asked and nothing followed: ask the newest first. With more,
+        # the plan below has to carry the comment (see the warning).
+        who = earlier[0]
+        said = "were told yes" if who.get("granted") else "asked to work on this"
+        opening = (
+            f"@{who['login']}, you {said} {who['days_ago']} days ago. "
+            "Are you still on it? If not, I'd like to take it."
+        )
     lines = [
         f"On {ref}, one comment:",
         "",
-        "I'd like to work on this. I reproduced it on <commit> with <steps>.",
+        f"{opening} I reproduced it on <commit> with <steps>.",
         f"The cause looks to be in {files}: <one sentence hypothesis>.",
         "Plan: <one or two lines>. I expect to open a PR by <date>.",
         "If someone is already on it, tell me and I'll pick another issue.",
@@ -245,6 +298,9 @@ def _claim(ctx: dict[str, Any]) -> str:
         lines.insert(
             1, "(This project does not assign issues: open the PR when ready instead of waiting.)"
         )
+    elif convention.get("kind") == "wait_assigned":
+        lines.append("")
+        lines.append("(This project assigns issues: wait until a maintainer assigns you.)")
     if any("assigned to the author" in gate for gate in ctx.get("gates") or []):
         lines.append("")
         lines.append(
@@ -323,13 +379,23 @@ def manifest_commands(names: set[str], *, package_json: str | None) -> tuple[lis
     return [], None
 
 
+# Installing a Node project's dependencies, however it is spelled: "npm ci", "npm
+# clean-install", or "npm install" with only flags. CircuitVerse's CI has "npm ci" in one
+# job and "npm install" in another; listing both says to install twice.
+_NODE_DEPS_RE = re.compile(
+    r"^(?:(yarn)(?: install)?|(npm|pnpm) (?:ci|clean-install|install|i))(?: -\S+)*$"
+)
+
+
 def _distinct(commands: list[str] | None, limit: int = 2) -> list[str]:
     """One command per tool and action: "npm clean-install --ignore-scripts" repeats
-    "npm clean-install"."""
+    "npm clean-install", and "npm install" repeats "npm ci"."""
     seen: set[str] = set()
     out: list[str] = []
     for command in commands or []:
-        key = " ".join(command.split()[:2])
+        node = _NODE_DEPS_RE.match(command)
+        tool = node and (node.group(1) or node.group(2))
+        key = f"{tool} dependencies" if tool else " ".join(command.split()[:2])
         if key not in seen:
             seen.add(key)
             out.append(command)
@@ -337,7 +403,7 @@ def _distinct(commands: list[str] | None, limit: int = 2) -> list[str]:
 
 
 def _from(ctx: dict[str, Any]) -> str:
-    source = ctx.get("commands_source")
+    source = ctx.get("install_source") or ctx.get("commands_source")
     return f"(from {source})" if source and source != "CI" else "as CI does"
 
 
@@ -356,7 +422,7 @@ def _lockfile_line(ctx: dict[str, Any]) -> list[str]:
     CI would fail too if its own `npm ci` hit that, so this is only for commands
     read from package.json. ruxailab/web-eye-tracker-front was such a case.
     """
-    if ctx.get("commands_source") == "CI":
+    if (ctx.get("install_source") or ctx.get("commands_source")) == "CI":
         return []
     if "npm ci" not in (ctx.get("install_commands") or []):
         return []
@@ -449,14 +515,66 @@ _RENDERERS = {
 }
 
 
+def _project_rules(kind: str, ctx: dict[str, Any]) -> list[dict[str, str]]:
+    """What this project's own guide says, before the general rules.
+
+    A blind test passed --repo and got the same pandas and Kubernetes rules as without
+    it. With a repository, the first rule now says what its contributing guide says
+    about claiming, or that it says nothing.
+    """
+    if kind != "claim" or "claim_convention" not in ctx:
+        return []
+    convention = ctx.get("claim_convention") or {}
+    source = str(ctx.get("contributing_url") or "")
+    said = convention.get("text", "")
+    if convention.get("kind") == "command":
+        rule = f"This project's contributing guide says to claim an issue with {said}."
+    elif convention.get("kind") == "no_assignment":
+        rule = (
+            "This project's contributing guide says it does not assign issues: open the "
+            "pull request when it is ready instead of waiting."
+        )
+    elif convention.get("kind") == "comment":
+        rule = f'This project\'s contributing guide says: "{said}". Do that, with your plan.'
+    elif convention.get("kind") == "claim_by":
+        rule = f"This project's contributing guide says to claim an issue by {said}."
+    elif convention.get("kind") == "wait_assigned":
+        rule = (
+            "This project's contributing guide says to wait until a maintainer assigns you "
+            "before you start work."
+        )
+    elif convention.get("kind") == "unread":
+        # A rate limit is not "no guide": the rule may be there, unread.
+        rule = (
+            f"GitHub did not answer for this project's {said}, so its rule for claiming an "
+            "issue was not read. Read its contributing guide on GitHub, if it has one, "
+            "before you claim, or run this again later."
+        )
+        source = source or "not read: GitHub did not answer"
+    elif source:
+        rule = (
+            "This project's contributing guide does not say how to claim an issue. Post one "
+            "comment with your plan in the issue, and follow what maintainers answer there."
+        )
+    else:
+        rule = (
+            "This project has no contributing guide that says how to claim an issue. Post "
+            "one comment with your plan in the issue, and follow what maintainers answer."
+        )
+    return [{"rule": rule, "source": source or "no contributing guide found", "scope": "project"}]
+
+
 def render_draft(kind: str, *, context: dict[str, Any]) -> dict[str, Any]:
+    """The template, the fields that must be filled, and the sourced rules for one
+    kind of draft. Raises ValueError for a kind that is not in DRAFT_KINDS."""
     if kind not in _RENDERERS:
         raise ValueError(f"Unknown draft kind: {kind}. Choose one of {', '.join(DRAFT_KINDS)}.")
+    general = [{**rule, "scope": "general"} for rule in _RULES[kind]]
     return {
         "kind": kind,
         "template": _RENDERERS[kind](context),
         "must_fill": list(_MUST_FILL[kind]),
-        "rules": [dict(rule) for rule in _RULES[kind]],
+        "rules": [*_project_rules(kind, context), *general],
         "note": (
             "Replace every <placeholder> with your own observation. Send nothing you cannot "
             "back up; reviewers read the same public history you do."
@@ -491,6 +609,18 @@ _PLAN_RE = re.compile(
     re.I,
 )
 _TRIED_RE = re.compile(r"\b(?:tried|attempted|searched|checked|looked at|ran|read)\b", re.I)
+# Signs the writer looked at this issue, beyond the words the plan check knows: a file,
+# a line, a code span or a camelCase name (frameCount, not iOS or macOS), a cause, a concrete next step, or a fix ready.
+_LOOKED_RE = re.compile(
+    r"`[^`\n]+`|\b[\w/-]+\.(?:py|js|ts|tsx|jsx|java|kt|c|cc|cpp|h|go|rs|rb|php|css|scss|html|"
+    r"md|rst|yml|yaml|json|toml)\b|\bline \d+\b|\b[a-z]{2,}[A-Z][a-z]\w*\b|root cause|investigated|"
+    r"\bready (?:locally|to open)\b|\b(?:fix|fixes|change|patch)(?:es)? ready\b|"
+    r"(?i:\bI(?:'ve| have) (?:also |already )?(?:made|added|fixed|implemented|written|opened))\b|"
+    r"\b(?:I'll|I will|I'd|I would|I can)\s+(?:\w+\s+){0,2}?(?:trace|track down|investigate|"
+    r"implement|match|keep|adjust|rename|replace|move|remove|write|refactor|look into|"
+    r"handle|test)\b|\bby (?:adding|keeping|changing|returning|using|replacing|moving|"
+    r"removing|renaming|checking)\b|\b\d\. \w+ing\b",
+)
 _ASK_TO_ASK_RE = re.compile(r"\b(?:can i ask|may i ask|anyone (?:here|around|online))\b", re.I)
 _PRIVATE_RE = re.compile(r"\b(?:dm me|direct message|message me privately|private message)\b", re.I)
 _ISSUE_REF_RE = re.compile(r"#\d+|/issues/\d+")
@@ -614,13 +744,17 @@ def check_message(kind: str, text: str) -> dict[str, Any]:
                 )
             )
     elif kind == "claim":
-        if _BARE_CLAIM_RE.search(body) and words < 25:
+        # Skills and enthusiasm do not make a request less bare: "I have strong skills in
+        # Python, ML, DL ... Kindly assign this issue to me" says nothing about the issue.
+        looked = _PLAN_RE.search(body) or _TRIED_RE.search(body) or _LOOKED_RE.search(body)
+        if _BARE_CLAIM_RE.search(body) and (words < 25 or not looked):
             findings.append(
                 _finding(
                     "bare_claim",
                     "fail",
                     "A bare request to work on it",
-                    "Add how you reproduced it and a one or two line plan.",
+                    "Add how you reproduced it and a one or two line plan. A list of your "
+                    "skills does not tell the maintainer how you would fix this issue.",
                     PANDAS_CONTRIBUTING,
                 )
             )

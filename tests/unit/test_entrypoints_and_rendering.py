@@ -1,3 +1,6 @@
+"""Entry points and rendering: `python -m`, the snapshot writer, tables and panels from fixture
+data, Windows code pages, and files saved by editors."""
+
 from __future__ import annotations
 
 import json
@@ -145,11 +148,38 @@ def test_repo_panel_renders_signals_and_setup_hints() -> None:
     respx.get(url__startswith="https://commits.ecosyste.ms").mock(
         return_value=httpx.Response(404, json={})
     )
-    result = runner.invoke(app, ["repo", "acme/lib"])
+    result = runner.invoke(app, ["repo", "acme/lib", "--track"])
     assert result.exit_code == 0, result.output
     assert "grade" in result.output and "CONTRIBUTING" in result.output
     assert "Dev container" in result.output
     assert "Discord" in result.output
+    words = " ".join(result.output.split())
+    # A blind beginner run could not see where a C's points went: signals with no
+    # line of their own (Code of Conduct, templates) cost points silently.
+    assert "Where it lost points" in words
+    assert "Code of Conduct: 0 of 4" in words
+    assert "Issue or PR templates: 0 of 4" in words
+    # Missing ecosyste.ms data is left out with a reason, never shown with a check mark.
+    assert "Left out: people who landed a single commit last year" in words
+    assert "✓ No commit history" not in words
+    assert "Saved to your progress. `next` will list new beginner issues opened here." in words
+    # Like the other commands, `repo` ends with what to run next.
+    assert "Next: git-into-gsoc " in words
+
+
+@respx.mock
+def test_setup_hints_never_name_a_guide_the_repository_lacks() -> None:
+    # "Read README.md and CONTRIBUTING.md" right after "No CONTRIBUTING guide detected"
+    # read as a contradiction in a blind beginner run (2026-10-22).
+    from git_into_gsoc.service import GSoCToolkit
+
+    api = "https://api.github.com/repos/acme/bare"
+    respx.get(api).mock(return_value=httpx.Response(200, json={"language": None}))
+    respx.get(f"{api}/community/profile").mock(return_value=httpx.Response(200, json={}))
+    respx.get(f"{api}/contents/").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{api}/labels").mock(return_value=httpx.Response(200, json=[]))
+    guide = GSoCToolkit().github.contribution_guide("acme/bare")
+    assert guide.setup_hints == ["Read README.md before coding"]
 
 
 def test_output_never_crashes_on_a_legacy_windows_code_page(tmp_path: Path) -> None:

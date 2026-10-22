@@ -1,3 +1,6 @@
+"""Repository functions and the `repos` command: pull request statistics, labels, toolchains,
+mirrors, and the ranking with its outside-merge checks."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -14,6 +17,9 @@ from git_into_gsoc.github.repos import (
     is_bot,
     is_main_repo,
     mentioned_repos,
+    outside_authors_merged,
+    outside_merges,
+    outside_merges_points,
     pick_beginner_label,
     pull_stats,
     repo_kind,
@@ -518,6 +524,7 @@ def test_a_main_repository_with_issues_turned_off_is_still_ranked(
     ]
     monkeypatch.setattr(toolkit.github, "list_owner_repos", lambda owner, pages=1: listed)
     monkeypatch.setattr(toolkit.github, "beginner_issue_counts", lambda owner: {})
+    monkeypatch.setattr(toolkit.github, "list_pulls", lambda owner, repo, **k: [])
     found = toolkit.discover_repos("scummvm")
     assert found["repos"][0]["full_name"] == "scummvm/scummvm"
     assert any("issues are turned off" in r for r in found["repos"][0]["reasons"])
@@ -533,3 +540,279 @@ def test_a_full_first_page_of_repositories_reads_the_second() -> None:
     respx.get(api).mock(return_value=httpx.Response(200, json=first))
     repos = GitHubClient().list_owner_repos("openMF", pages=2)
     assert len(repos) == 101 and repos[-1]["full_name"] == "openMF/mifos-mobile"
+
+
+def test_outside_authors_merged_counts_people_without_write_access_lately() -> None:
+    since = NOW - timedelta(days=180)
+
+    def pr(login: str, role: str, days: float | None, bot: bool = False) -> dict[str, Any]:
+        return {
+            "user": {"login": login, "type": "Bot" if bot else "User"},
+            "author_association": role,
+            "merged_at": _iso(days) if days is not None else None,
+        }
+
+    pulls = [
+        pr("ana", "CONTRIBUTOR", 10),
+        pr("ana", "CONTRIBUTOR", 20),  # the same person twice
+        pr("ben", "NONE", 30),
+        pr("core", "MEMBER", 5),  # the team
+        pr("dependabot[bot]", "NONE", 2, bot=True),
+        pr("old", "CONTRIBUTOR", 400),  # too long ago
+        pr("open", "CONTRIBUTOR", None),  # not merged
+    ]
+    assert outside_authors_merged(pulls, since=since) == 2
+
+
+def test_a_repository_outsiders_never_get_merged_in_drops_below_one_they_do(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from git_into_gsoc.service import GSoCToolkit
+
+    toolkit = GSoCToolkit()
+    monkeypatch.setattr(toolkit.gsoc, "get_organization", lambda name, year=None: None)
+
+    def repo(name: str, stars: int) -> dict[str, Any]:
+        return {
+            "full_name": f"lab/{name}",
+            "html_url": f"https://github.com/lab/{name}",
+            "language": "Python",
+            "stargazers_count": stars,
+            "pushed_at": _iso(1),
+            "fork": False,
+            "has_issues": True,
+        }
+
+    listed = [repo("quiet-helper", 900), repo("toolkit", 300)]
+    merged = {"user": {"login": "ana"}, "author_association": "CONTRIBUTOR", "merged_at": _iso(9)}
+    by_team = {"user": {"login": "core"}, "author_association": "MEMBER", "merged_at": _iso(3)}
+    monkeypatch.setattr(toolkit.github, "list_owner_repos", lambda owner, pages=1: listed)
+    monkeypatch.setattr(toolkit.github, "beginner_issue_counts", lambda owner: {})
+    monkeypatch.setattr(
+        toolkit.github,
+        "list_pulls",
+        lambda owner, repo, **k: [merged] * 3 if repo == "toolkit" else [by_team] * 5,
+    )
+    found = toolkit.discover_repos("lab")
+    assert [r["full_name"] for r in found["repos"]] == ["lab/toolkit", "lab/quiet-helper"]
+    quiet = found["repos"][1]
+    assert any("No pull request from outside the team merged" in r for r in quiet["reasons"])
+
+
+def test_a_repository_that_rises_into_the_checked_top_is_checked_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import git_into_gsoc.service as service
+    from git_into_gsoc.service import GSoCToolkit
+
+    toolkit = GSoCToolkit()
+    monkeypatch.setattr(service, "OUTSIDE_CHECKED", 1)
+    monkeypatch.setattr(toolkit.gsoc, "get_organization", lambda name, year=None: None)
+    listed = [
+        {
+            "full_name": f"lab/{name}",
+            "html_url": f"https://github.com/lab/{name}",
+            "stargazers_count": stars,
+            "pushed_at": _iso(1),
+            "fork": False,
+            "has_issues": True,
+        }
+        for name, stars in (("quiet", 900), ("busy", 300))
+    ]
+    seen: list[str] = []
+
+    def pulls(owner: str, repo: str, **k: Any) -> list[dict[str, Any]]:
+        seen.append(repo)
+        return (
+            []
+            if repo == "quiet"
+            else [{"user": {"login": "ana"}, "author_association": "NONE", "merged_at": _iso(5)}]
+        )
+
+    monkeypatch.setattr(toolkit.github, "list_owner_repos", lambda owner, pages=1: listed)
+    monkeypatch.setattr(toolkit.github, "beginner_issue_counts", lambda owner: {})
+    monkeypatch.setattr(toolkit.github, "list_pulls", pulls)
+    found = toolkit.discover_repos("lab")
+    assert seen == ["quiet", "busy"]
+    assert found["repos"][0]["full_name"] == "lab/busy"
+
+
+def test_repos_says_where_to_start_when_no_repository_takes_outside_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from git_into_gsoc.service import GSoCToolkit
+
+    toolkit = GSoCToolkit()
+    monkeypatch.setattr(toolkit.gsoc, "get_organization", lambda name, year=None: None)
+    listed = [
+        {
+            "full_name": f"lab/tool-{n}",
+            "html_url": f"https://github.com/lab/tool-{n}",
+            "stargazers_count": 10,
+            "pushed_at": _iso(1),
+            "fork": False,
+            "has_issues": True,
+        }
+        for n in range(4)
+    ]
+    by_team = {"user": {"login": "core"}, "author_association": "MEMBER", "merged_at": _iso(3)}
+    monkeypatch.setattr(toolkit.github, "list_owner_repos", lambda owner, pages=1: listed)
+    monkeypatch.setattr(toolkit.github, "beginner_issue_counts", lambda owner: {})
+    monkeypatch.setattr(toolkit.github, "list_pulls", lambda owner, repo, **k: [by_team])
+    note = toolkit.discover_repos("lab")["note"]
+    assert "None of the 4 repositories checked" in note
+    assert "mentors" in note
+    # "lab" is a GitHub login, not a GSoC organization `ideas` could look up.
+    assert "git-into-gsoc ideas" not in note
+    # One repository that takes outside work is enough to say nothing.
+    welcome = {"user": {"login": "ana"}, "author_association": "NONE", "merged_at": _iso(3)}
+    monkeypatch.setattr(
+        toolkit.github,
+        "list_pulls",
+        lambda owner, repo, **k: [welcome] if repo == "tool-2" else [by_team],
+    )
+    assert toolkit.discover_repos("lab")["note"] == ""
+
+
+def test_an_empty_issue_search_in_an_organization_points_to_its_ideas() -> None:
+    from git_into_gsoc.service import _when_no_issues
+
+    steps = _when_no_issues("python", org="ML4SCI", repo=None, gsoc_org=True)
+    assert any('git-into-gsoc ideas "ML4SCI"' in step for step in steps)
+    # A plain GitHub login is not something `ideas` can look up.
+    login = _when_no_issues("python", org="some-lab", repo=None)
+    assert not any("git-into-gsoc ideas" in step for step in login)
+    assert not any(
+        "git-into-gsoc ideas" in s for s in _when_no_issues("python", org=None, repo=None)
+    )
+
+
+def _closed(login: str, role: str, days: float, *, merged: bool = True, bot: bool = False):
+    return {
+        "user": {"login": login, "type": "Bot" if bot else "User"},
+        "author_association": role,
+        "updated_at": _iso(days),
+        "merged_at": _iso(days) if merged else None,
+    }
+
+
+def test_the_outside_merge_claim_covers_only_the_period_the_sample_reaches() -> None:
+    # A full page of 30 that reaches back 12 days says nothing about the last 180.
+    busy = [_closed("core", "MEMBER", 0.4 * n) for n in range(30)]
+    found = outside_merges(busy)
+    assert found.days <= 12 and found.authors == 0
+    _, reason = outside_merges_points(found)
+    assert "in the last 180 days" not in reason and "its last 30 closed" in reason
+    # A shorter page is the whole history: the full window holds.
+    small = [_closed("core", "MEMBER", 10), _closed("core", "MEMBER", 300)]
+    assert outside_merges(small).days == 180
+
+
+def test_bots_only_no_pulls_and_several_outsiders_each_say_what_they_mean() -> None:
+    bots = outside_merges([_closed("dependabot[bot]", "NONE", 1, bot=True)] * 30)
+    points, reason = outside_merges_points(bots)
+    assert points == 0 and "all from bots" in reason
+    points, reason = outside_merges_points(outside_merges([]))
+    assert points < 0 and "No closed pull requests yet" in reason
+    many = outside_merges([_closed(name, "CONTRIBUTOR", 5) for name in ("ana", "ben", "cy")])
+    points, reason = outside_merges_points(many)
+    assert many.authors == 3 and points > 0 and "3 people outside the team" in reason
+
+
+def _quiet_lab(monkeypatch: pytest.MonkeyPatch, count: int, *, failing: set[str] = frozenset()):
+    from git_into_gsoc.errors import RateLimitError
+    from git_into_gsoc.service import GSoCToolkit
+
+    toolkit = GSoCToolkit()
+    monkeypatch.setattr(toolkit.gsoc, "get_organization", lambda name, year=None: None)
+    listed = [
+        {
+            "full_name": f"lab/tool-{n}",
+            "html_url": f"https://github.com/lab/tool-{n}",
+            "stargazers_count": 100 - n,
+            "pushed_at": _iso(1),
+            "fork": False,
+            "has_issues": True,
+        }
+        for n in range(count)
+    ]
+    calls: list[str] = []
+
+    def pulls(owner: str, repo: str, **k: Any) -> list[dict[str, Any]]:
+        calls.append(repo)
+        if repo in failing:
+            raise RateLimitError("limit", reset_at=None)
+        return [_closed("core", "MEMBER", 3)]
+
+    monkeypatch.setattr(toolkit.github, "list_owner_repos", lambda owner, pages=1: listed)
+    monkeypatch.setattr(toolkit.github, "beginner_issue_counts", lambda owner: {})
+    monkeypatch.setattr(toolkit.github, "list_pulls", pulls)
+    return toolkit, calls
+
+
+def test_in_an_all_quiet_organization_no_unchecked_repository_rises_above_a_checked_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toolkit, calls = _quiet_lab(monkeypatch, 20)
+    found = toolkit.discover_repos("lab", limit=20)
+    assert len(calls) == 15  # the request budget
+    read = [r for r in found["repos"] if any("outside the team" in x for x in r["reasons"])]
+    assert found["repos"][: len(read)] == read  # every read one before every unread one
+    assert "None of the 15 repositories checked" in found["note"]
+
+
+def test_a_failed_read_keeps_its_place_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    # tool-0, the main repository, fails to load; the others are quiet and lose points.
+    toolkit, _ = _quiet_lab(monkeypatch, 12, failing={"tool-0"})
+    found = toolkit.discover_repos("lab")
+    names = [r["full_name"] for r in found["repos"]]
+    assert names[0] == "lab/tool-0"  # a passing error does not push it off the list
+    assert any("could not be read" in x for x in found["repos"][0]["reasons"])
+    assert "1 repository could not be read" in found["note"]
+    assert "request limit" not in found["note"]  # the cause is not known
+
+
+def test_an_outside_merge_older_than_a_busy_sample_still_counts() -> None:
+    # 29 team pull requests in the last 3 days, and an outsider's merged 30 days ago that
+    # was updated yesterday: the outsider counts, though "none" could claim only 3 days.
+    pulls = [_closed("core", "MEMBER", 0.1 * n) for n in range(29)]
+    outsider = _closed("ana", "CONTRIBUTOR", 30)
+    outsider["updated_at"] = _iso(1)
+    found = outside_merges([*pulls, outsider])
+    assert found.authors == 1
+    points, reason = outside_merges_points(found)
+    assert points > 0 and "in the last 180 days" in reason
+
+
+def test_a_sample_spanning_hours_says_the_last_day() -> None:
+    found = outside_merges([_closed("core", "MEMBER", 0.01 * n) for n in range(30)])
+    _, reason = outside_merges_points(found)
+    assert "in the last day" in reason and "1 days" not in reason
+
+
+@respx.mock
+def test_beginner_issues_opened_counts_one_search_over_owners_and_labels() -> None:
+    route = respx.get("https://api.github.com/search/issues").mock(
+        return_value=httpx.Response(200, json={"total_count": 17, "items": []})
+    )
+    count = GitHubClient().beginner_issues_opened(
+        ["ML4SCI", "other"], since="2025-10-22", labels=["good first issue", "beginner"]
+    )
+    assert count == 17
+    params = route.calls[0].request.url.params
+    assert params["advanced_search"] == "true"  # without it the label OR group finds nothing
+    query = params["q"]
+    assert "created:>=2025-10-22" in query and "good first issue" in query and "ML4SCI" in query
+
+
+def test_a_higher_score_below_a_lower_one_is_explained(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 20 quiet repositories: 15 are read and lose points, 5 are not and follow them.
+    toolkit, _ = _quiet_lab(monkeypatch, 20)
+    found = toolkit.discover_repos("lab", limit=20)
+    unread = [
+        r for r in found["repos"] if any("Not checked for outside" in x for x in r["reasons"])
+    ]
+    assert len(unread) == 5
+    assert "The first 15 were checked" in found["score_meaning"]
+    assert all(r["score"] > found["repos"][0]["score"] for r in unread)  # higher, yet below
+    assert found["repos"][-5:] == unread

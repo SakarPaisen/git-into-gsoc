@@ -67,23 +67,20 @@ You get the organizations that fit you, a shortlist, and your next steps with th
 
 ## Use it in your AI assistant
 
-The installer already connects the assistants it finds. To add git-into-gsoc as a plugin that updates with your assistant instead, run one line. You need [uv](https://docs.astral.sh/uv/), a free tool that starts the git-into-gsoc server your assistant talks to.
+The installer already connects the assistants it finds. To add git-into-gsoc as a plugin that updates with your assistant instead, run one line. You need [uv](https://docs.astral.sh/uv/), a free tool that starts the git-into-gsoc server your assistant talks to. For Claude Code:
 
-| Assistant | Command |
-|---|---|
-| Claude Code | `claude plugin install git-into-gsoc --marketplace anandkaranubc/git-into-gsoc` |
-| Codex | `codex plugin marketplace add anandkaranubc/git-into-gsoc`, then `codex plugin add git-into-gsoc@git-into-gsoc` |
-| GitHub Copilot CLI | `copilot plugin marketplace add anandkaranubc/git-into-gsoc`, then `copilot plugin install git-into-gsoc@git-into-gsoc` |
-| Gemini CLI (paid plans; on a free Google account use Antigravity) | `gemini extensions install https://github.com/anandkaranubc/git-into-gsoc --auto-update` |
-| Antigravity | `agy plugin install https://github.com/anandkaranubc/git-into-gsoc` |
-| VS Code, Cursor, Windsurf, and others | [Setup for each assistant](docs/assistants.md) |
+```bash
+claude plugin install git-into-gsoc --marketplace anandkaranubc/git-into-gsoc
+```
+
+[Use it in your AI assistant](docs/assistants.md) has the line for Codex, GitHub Copilot CLI, Gemini CLI, Antigravity, VS Code, Cursor, Windsurf, and Claude Desktop, and how to update or remove each one.
 
 Then ask in your own words, for example: *"I want to do Google Summer of Code. I know Python and like science. Where do I start?"* The assistant uses the same live data as the terminal and shows its sources.
 
-One-click buttons for the server alone. They run the newest release from PyPI:
+One-click buttons for the server alone. Each installs the newest release:
 
 <!-- generated:install-links -->
-[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=git-into-gsoc&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJnaXQtaW50by1nc29jQGxhdGVzdCIsIm1jcCJdfQ%3D%3D) [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=git-into-gsoc&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=git-into-gsoc&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D&quality=insiders) [![Add to Kiro](https://img.shields.io/badge/Kiro-Add_server-7138CC?style=flat-square&logo=kiro&logoColor=white)](https://kiro.dev/launch/mcp/add?name=git-into-gsoc&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=git-into-gsoc&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJnaXQtaW50by1nc29jQGxhdGVzdCIsIm1jcCJdfQ%3D%3D) [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=git-into-gsoc&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=git-into-gsoc&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D&quality=insiders) [![Add to Kiro](https://kiro.dev/images/add-to-kiro.svg)](https://kiro.dev/launch/mcp/add?name=git-into-gsoc&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D) [![Install in Visual Studio](https://img.shields.io/badge/Visual_Studio-Install_server-5C2D91?style=flat-square&logo=visualstudio&logoColor=white)](https://vs-open.link/mcp-install?%7B%22name%22%3A%22git-into-gsoc%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22git-into-gsoc%40latest%22%2C%22mcp%22%5D%7D) [![Download for Claude Desktop](https://img.shields.io/badge/Claude_Desktop-Download_extension-D97757?style=flat-square&logo=claude&logoColor=white)](https://github.com/anandkaranubc/git-into-gsoc/releases/latest/download/git-into-gsoc.mcpb)
 <!-- /generated:install-links -->
 
 ## From zero to a first pull request

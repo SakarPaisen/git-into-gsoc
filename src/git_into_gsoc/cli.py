@@ -1,4 +1,11 @@
-"""Typer CLI for git-into-gsoc."""
+"""The command line: most commands call one GSoCToolkit method and render the result.
+
+Command docstrings are the `--help` text people read, so they are written for people;
+a test checks that every command and option has help text and is listed in
+docs/cli.md. Every string from data goes through `escape` (`_markup_safe`) before
+rich renders it: issue titles, labels, and project pages are text strangers wrote,
+and the person's own notes must print literally.
+"""
 
 from __future__ import annotations
 
@@ -232,6 +239,11 @@ def _render_home(data: dict[str, Any]) -> None:
             else:
                 _say(f"  [dim]○ {step['label']}[/dim]")
         _say(f"What to do now, with live checks:\n  [cyan]{data['next_command']}[/cyan]")
+    if not data["github_token"]:
+        _say(
+            "\n[dim]Tip: run gh auth login once so issue searches do not hit GitHub's limit "
+            "for anonymous use.[/dim]"
+        )
     _say("\n[bold]Commands to start with[/bold]")
     for name, what in _HOME_COMMANDS:
         _say(f"  [cyan]{name:<8}[/cyan] {what}")
@@ -361,8 +373,9 @@ def _render_next_steps(data: dict[str, Any]) -> None:
     _numbered([f"{step['title']}\n[cyan]{step['command']}[/cyan]" for step in data["next_steps"]])
     _say(
         "\n[dim]Change your answers any time: run start again, or git-into-gsoc profile.\n"
-        "Prefer an AI assistant? After `git-into-gsoc setup`, ask it in your own words, "
-        'such as "Which GSoC issue should I try first?"[/dim]'
+        'Prefer an AI assistant? Ask it in your own words, such as "Which GSoC issue '
+        'should I try first?" If it does not know git-into-gsoc yet, run '
+        "`git-into-gsoc setup` once.[/dim]"
     )
 
 
@@ -715,7 +728,7 @@ def org_cmd(
             "Check its website to see whether it plans to apply again.[/yellow]"
         )
     console.print(Panel(Text.from_markup("\n".join(lines)), title=title))
-    _print_gsoc_posts(data.get("gsoc_posts") or {})
+    _print_gsoc_posts(data.get("gsoc_posts") or {}, data.get("statement_on_file"))
     if org.get("recent_projects"):
         table = Table(title="Recent accepted projects (for scope reference, never copy)")
         table.add_column("Year")
@@ -755,11 +768,42 @@ _POST_STATUS = {
 }
 
 
-def _print_gsoc_posts(found: dict[str, Any]) -> None:
+_ON_FILE = {
+    "not_taking_part": "it said it will not take part in GSoC {year}",
+    "undecided": "it had not decided about GSoC {year} yet",
+    "posted": "its maintainers had posted about GSoC {year}",
+}
+
+
+def _on_file_line(said: dict[str, Any]) -> str:
+    """The monthly check's statement, dated, for when the live search does not show it."""
+    year = said.get("year")
+    if said["status"] == "reported":
+        what = (
+            f'someone wrote in its tracker on {said.get("date")}: "{said.get("quote")}" '
+            "(a report, not the organization's own statement)"
+        )
+    else:
+        what = _ON_FILE.get(str(said["status"]), "it posted about GSoC {year}").format(year=year)
+    return f"The monthly check on {said.get('checked')} found that {what}: {said.get('url')}"
+
+
+def _print_gsoc_posts(found: dict[str, Any], said: dict[str, Any] | None = None) -> None:
     posts = found.get("posts") or []
-    if not posts:
+    error = found.get("error")
+    if said and any(p.get("url") == said.get("url") for p in posts):
+        said = None  # the live answer already shows it
+    if not posts and not error and not said:
         return
-    console.print(f"\n[bold]Posts about GSoC {found.get('year')} in its repositories[/bold]")
+    year = found.get("year") or (said or {}).get("year")
+    console.print(f"\n[bold]Posts about GSoC {year} in its repositories[/bold]")
+    if error:
+        # Saying nothing here would read as "it has posted nothing about the year".
+        console.print(
+            f"  [yellow]Could not search its issues for posts about GSoC {year}: "
+            f"{escape(str(error.get('error') or 'GitHub search failed'))}[/yellow]"
+        )
+        console.print(f"  [dim]{escape(str(error.get('hint') or 'Run it again later.'))}[/dim]")
     for post in posts:
         status = _POST_STATUS.get(post["status"], "")
         if post.get("source") == "wiki":
@@ -769,6 +813,8 @@ def _print_gsoc_posts(found: dict[str, Any]) -> None:
         who = "a maintainer" if post.get("by_maintainer") else f"@{post.get('author')}"
         console.print(f"  {post['created_at']}  {escape(post['title'])}  {status}")
         console.print(f"  [dim]{post['url']}  (by {escape(who)}, {post['state']})[/dim]")
+    if said:
+        console.print(f"  {escape(_on_file_line(said))}")
 
 
 @app.command("projects", rich_help_panel="Find an organization")
@@ -831,8 +877,17 @@ def ideas_cmd(
     if data.get("hours_note"):
         console.print(f"[yellow]![/yellow] {escape(data['hours_note'])}")
     if data["ideas"]:
-        table = Table(title="Project ideas", caption="? marks a block with no labelled fields")
-        table.add_column("Fit", justify="right")
+        # Fit orders ideas against a saved profile; without one every idea scores alike.
+        show_fit = any(idea.get("match_reasons") for idea in data["ideas"])
+        caption = "? marks a block with no labelled fields"
+        if show_fit:
+            caption += (
+                ". Fit: how close the idea is to your saved skills and interests; higher is "
+                "closer. It orders the list and is not a chance of being picked."
+            )
+        table = Table(title="Project ideas", caption=caption)
+        if show_fit:
+            table.add_column("Fit", justify="right")
         table.add_column("Idea", overflow="fold")
         table.add_column("Size", justify="right")
         table.add_column("Level")
@@ -851,8 +906,9 @@ def ideas_cmd(
             )
             if idea.get("too_big_for_your_hours"):
                 hours = f"[yellow]{hours} too big[/yellow]"
+            fit = [f"{idea['match_score']:.0f}"] if show_fit else []
             table.add_row(
-                f"{idea['match_score']:.0f}" if idea["match_score"] else "",
+                *fit,
                 title,
                 hours,
                 idea.get("difficulty") or "",
@@ -943,9 +999,13 @@ def repos_cmd(
         return
     data = _markup_safe(data)
     caption = (
-        "Ideas page read: repos it names are boosted."
-        if data["ideas_page_read"]
-        else "Ideas page not readable; ranking uses activity and beginner issues."
+        (
+            "Ideas page read: repos it names are boosted."
+            if data["ideas_page_read"]
+            else "Ideas page not readable; ranking uses activity and beginner issues."
+        )
+        + " "
+        + str(data.get("score_meaning") or "")
     )
     if data.get("note"):
         console.print(f"[yellow]{data['note']}[/yellow]")
@@ -998,6 +1058,13 @@ def repo_cmd(
         console.print(f"  [green]✓[/green] {signal}")
     for warning in health.get("warnings") or []:
         console.print(f"  [yellow]![/yellow] {warning}")
+    for note in health.get("notes") or []:
+        console.print(f"  [dim]·[/dim] {note}")
+    lost = _lost_points_lines(health)
+    if lost:
+        console.print("\n[bold]Where it lost points[/bold]")
+        for line in lost:
+            console.print(f"  {line}")
     console.print("\n[bold]Getting set up[/bold]")
     for hint in guide.get("setup_hints") or []:
         console.print(f"  • {hint}")
@@ -1005,6 +1072,40 @@ def repo_cmd(
         console.print(f"  • Read first: {guide['contributing_url']}")
     if guide.get("communication_channels"):
         console.print(f"  • Channels mentioned: {', '.join(guide['communication_channels'])}")
+    if data.get("tracked"):
+        console.print("\nSaved to your progress. `next` will list new beginner issues opened here.")
+    if data.get("next_step"):
+        console.print(f"\nNext: {data['next_step']}", soft_wrap=True)
+
+
+def _lost_points_lines(health: dict[str, Any]) -> list[str]:
+    """Each signal that earned less than its most, then what was left out or held it down."""
+    points = health.get("points") or []
+    scored = [p for p in points if p["most"]]
+    missed = sorted(
+        (p for p in scored if p["earned"] < p["most"]), key=lambda p: p["earned"] - p["most"]
+    )
+    lines = [
+        f"{p['signal']}: {p['earned']:g} of {p['most']:g}" + (f" ({p['why']})" if p["why"] else "")
+        for p in missed
+    ]
+    out_of = sum(p["most"] for p in scored)
+    # One line for everything left out, grouped by reason: a rate limit can leave out
+    # four signals at once, and four near-identical lines read as four problems.
+    left: dict[str, list[str]] = {}
+    for p in points:
+        if not p["most"]:
+            left.setdefault(str(p["why"] or "no data"), []).append(p["signal"].lower())
+    if left and out_of:
+        earned = sum(q["earned"] for q in scored)
+        reasons = "; ".join(f"{', '.join(names)} ({why})" for why, names in left.items())
+        lines.append(
+            f"Left out: {reasons}, so {earned:g} of {out_of:g} points counts as "
+            f"{earned * 100 / out_of:.0f} of 100"
+        )
+    if health.get("capped_by"):
+        lines.append(f"Held down: {health['capped_by']}")
+    return lines
 
 
 def _ci_environment_lines(env: dict[str, Any]) -> list[str]:
@@ -1053,6 +1154,8 @@ def orient_cmd(
         f"Last push: {data.get('pushed_days_ago')}d ago",
         f"[dim]As of commit {head} on {data['default_branch']}[/dim]",
     ]
+    if data.get("work_branch"):
+        lines.append(f"[yellow]! {escape(data['work_branch']['note'])}[/yellow]")
     console.print(Panel(Text.from_markup("\n".join(lines)), title="Orientation"))
 
     table = Table(title="Code map (purpose is a guess from the directory name)")
@@ -1218,22 +1321,39 @@ def issues_cmd(
     table = Table(title="Beginner-friendly issues", caption=data["note"])
     table.add_column("Score", justify="right")
     table.add_column("Status")
-    table.add_column("Issue", overflow="fold")
-    table.add_column("Title", overflow="fold")
+    # People copy "owner/repo#N" into `issue`: keep it on one line where it fits. At 110
+    # columns "learning-unlimited/ESP-Website#2455" broke before "2455". Below 100
+    # columns the title goes under the reference instead of beside it: four columns
+    # cannot keep a 35-character reference whole at 80, and a minimum width that does
+    # not fit makes rich crop the table at the right edge.
+    narrow = console.width < 100
+    others = 5 + 12 + (10 if narrow else 13 + 20)  # Score, Status, borders, a Title
+    longest = max(len(f"{i['repo']}#{i['number']}") for i in data["issues"])
+    table.add_column(
+        "Issue", overflow="fold", min_width=max(10, min(longest, 40, console.width - others))
+    )
+    if not narrow:
+        table.add_column("Title", overflow="fold")
     for issue in data["issues"]:
         status = issue["availability"]
         ref = f"{issue['repo']}#{issue['number']}"
+        if narrow:
+            ref += f"\n{issue['title']}"
         if issue.get("gsoc_org"):
             ref += f"\n[dim]{issue['gsoc_org']}[/dim]"
         if issue.get("filed_by_maintainer"):
             ref += "\n[dim]filed by a maintainer[/dim]"
-        if any(str(s).startswith("No beginner label") for s in issue.get("signals") or []):
+        caution = str(issue.get("caution") or "")
+        if caution:
+            ref += f"\n[yellow]! {caution}[/yellow]"
+        elif any(str(s).startswith("No beginner label") for s in issue.get("signals") or []):
             ref += "\n[dim]no beginner label[/dim]"
         shown = f"[{_STATUS_STYLE.get(status, '')}]{status.replace('_', ' ')}[/]"
         if status == "available" and ((issue.get("assessment") or {}).get("claims")):
             # Free by the rules, but someone asked months ago: a beginner should know.
-            shown += "\n[dim]someone asked before: ask first[/dim]"
-        table.add_row(f"{issue['beginner_score']:.0f}", shown, ref, issue["title"])
+            shown += "\n[dim]asked before[/dim]"
+        cells = [f"{issue['beginner_score']:.0f}", shown, ref]
+        table.add_row(*cells, *([] if narrow else [issue["title"]]))
     console.print(table)
     console.print("[dim]Next: git-into-gsoc issue owner/repo#N before you comment.[/dim]")
 
@@ -1261,8 +1381,10 @@ def issue_cmd(
     lines = [
         f"[bold]{data['title']}[/bold]",
         data["url"],
-        f"Status: [{style}]{data['availability']}[/] ({data['reason']})",
+        f"Status: [{style}]{data['availability'].replace('_', ' ')}[/] ({data['reason']})",
     ]
+    if data.get("caution"):
+        lines.append(f"[yellow]! May not suit a first contribution: {data['caution']}[/yellow]")
     if assessment["maintainer_engaged"]:
         lines.append("Maintainers have commented in this thread.")
     for pr in assessment["linked_prs"]:
@@ -1459,6 +1581,10 @@ def diagnose_cmd(
         return
     data = _markup_safe(data)
     console.print(f"[bold]{data['summary']}[/bold]")
+    if data.get("step"):
+        console.print(f"\n[bold]The failing step ({data['step']['command']}) printed[/bold]")
+        for line in data["step"]["printed"]:
+            console.print(f"  [dim]{line}[/dim]")
     for cause in data["causes"]:
         console.print(
             f"\n[yellow]{cause['id'].replace('_', ' ')}[/yellow]  line {cause['line']}: [dim]{cause['quote']}[/dim]"
@@ -1546,7 +1672,13 @@ def draft_cmd(
     for field in data["must_fill"]:
         console.print(f"  ☐ {escape(field)}")
     console.print("\n[bold]Rules, with sources[/bold]")
+    # The project's own rules first; the rest are general practice from well-run
+    # projects, so say that instead of leaving pandas and Kubernetes unexplained.
+    headed = False
     for rule in data["rules"]:
+        if rule.get("scope") == "general" and not headed:
+            console.print("  [dim]General practice, from projects that wrote it down:[/dim]")
+            headed = True
         console.print(f"  • {escape(rule['rule'])}\n    [dim]{rule['source']}[/dim]")
     console.print(f"\n[dim]{escape(data['note'])}[/dim]")
 
@@ -1650,12 +1782,15 @@ def recommend_cmd(
         issues.add_column("Fits you", overflow="fold")
         for issue in data["starter_issues"]:
             status = issue["availability"]
-            issues.add_row(
-                f"[{_STATUS_STYLE.get(status, '')}]{status}[/]",
-                f"{issue['repo']}#{issue['number']}",
-                issue["title"],
-                "; ".join(issue.get("fits_you") or []),
-            )
+            shown = f"[{_STATUS_STYLE.get(status, '')}]{status}[/]"
+            if status == "available" and (issue.get("assessment") or {}).get("claims"):
+                # As in `issues`: free by the rules, but someone asked months ago
+                # (rust-lang/beyond-refs#27, 177 days); ask them before starting.
+                shown += "\n[dim]asked before[/dim]"
+            ref = f"{issue['repo']}#{issue['number']}"
+            if issue.get("caution"):
+                ref += f"\n[yellow]! {issue['caution']}[/yellow]"
+            issues.add_row(shown, ref, issue["title"], "; ".join(issue.get("fits_you") or []))
         console.print(issues)
     elif data.get("starter_issue_error"):
         console.print(
@@ -2372,7 +2507,8 @@ def feedback_cmd(
     _say(
         "This opens a GitHub form with your versions filled in, so you can tell us what "
         "worked and what did not. Nothing is sent until you read it and press Submit. "
-        "Submitting needs a GitHub account."
+        "Submitting needs a GitHub account and creates a public issue under your "
+        "username, so leave out anything private."
     )
     _say(f"[dim]Filled in: {escape(system_summary())}[/dim]")
     console.print(url, markup=False, highlight=False, soft_wrap=True)

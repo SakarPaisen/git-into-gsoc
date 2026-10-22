@@ -52,10 +52,10 @@ NOT_OPEN_LABELS = {
 }
 # Projects spell these many ways ("Status: Needs-Discussion", "needs:design", "state:
 # blocked"), so a label is matched after lower-casing it and turning each run of
-# punctuation into one space. On 24,779 labels from the top repositories of 153 GSoC
-# organizations (2026-10-21), the exact names above matched 9 spellings and this
-# matches 95, none of them wrongly on review. "blocker" is a priority, "design" a
-# topic, and "lifecycle/frozen" only stops a bot from closing the issue.
+# punctuation into one space. On 24,779 labels from the top repositories of 144 GSoC
+# organizations' GitHub owners (2026-10-21), the exact names above matched 9 spellings
+# and this matches 95, none of them wrongly on review. "blocker" is a priority, "design"
+# a topic, and "lifecycle/frozen" only stops a bot from closing the issue.
 _NOT_OPEN_LABEL_RE = re.compile(
     r"\bneeds?\s+(?:(?:further|more|community|team|a)\s+)?(?:discussion|decisions?|design)\b"
     r"|\b(?:discussion|decision|design)\s+(?:needed|required)\b"
@@ -90,6 +90,17 @@ CONTESTED_MIN_CLAIMANTS = 3
 STALE_DAYS = 365
 
 _CLAIM_PATTERNS = [
+    # A plan is a claim. This project's own good-first issues ask "comment with what you
+    # plan to do", and a "## Planned change ... I will add ..." comment read as no claim
+    # (a launch audit, 0.23.0). Measured on the five labelled samples (1,900 comments):
+    # seven more claims caught, one more false alarm ("I'll update the PR to whichever
+    # you pick", from someone whose open pull request already marks the issue taken).
+    # One line only, and no two runs of spaces that could share the same characters: a
+    # "## Plan" line padded with 50,000 spaces must not make the match backtrack.
+    r"^\ufeff?[ \t]*#{1,6}[ \t]*(?:planned change|my plan|plan|proposed (?:change|fix|"
+    r"approach|plan|solution)|approach)[ \t]*(?::[ \t]*)?$",
+    r"\bi(?:'ll| will) (?:add|update|write|rewrite|change|document|refactor|create|replace|"
+    r"remove|move|rename|clarify|improve|extend)\b",
     r"\bi(?:'m| am) (?:currently |now )?working on (?:this|it|the issue)\b",
     r"\bi(?:'ll| will) (?:take|work on|pick up|handle|fix) (?:this|it)\b",
     r"(?<!how )\b(?:can|could|may) i (?:please )?(?:work on|take|pick up|tackle|fix|be assigned|"
@@ -199,10 +210,31 @@ _CLAIM_PATTERNS = [
     r"^\s*(?:in progress|pr soon)\b",
     r"\bdo you want me to (?:work on|take|fix)\b",
     r"\b(?:we|i) (?:could|can) work (?:on (?:this|it) )?together\b",  # a second claimant
+    # A fifth sample (568 comments, 21 organizations never sampled, labelled blind)
+    # measured 78% recall held out; these come from its tuning half only, split by
+    # issue thread, so the other half still measures them fairly.
+    r"\bi(?:'ll| will| shall) (?:work on|take|handle|fix) (?:this|it)\b",
+    r"\b(?:can|could|may) i (?:please )?(?:address|do) (?:this|it)\b",
+    r"\b(?:please )?let me (?:work on|take|fix|handle|tackle|try)\b",
+    r"\bplease assign (?:it|this)\s*(?:[.!]|$)|\badd me as (?:a |an )?(?:co-?)?assignee\b",
+    r"\bi can (?:also )?(?:take|pick) up (?:this|it)\b",
+    r"\bi(?:'ll| will) (?:raise|open|submit|create|send) (?:a |the |my )?(?:pr|pull request)\b",
+    r"\bi(?:'m| am) (?:raising|opening|submitting|creating) (?:a |the |my )?(?:pr|pull request)\b",
+    r"\bi (?:have )?(?:started|began) (?:implementing|working|looking into (?:this|it)|on (?:this|it))\b",
+    r"\btaking (?:this|it) up\b|\bself[- ]?assigned\b",
+    # Work already done on it: "I have made minimal changes to fix this".
+    r"\bi(?:'ve| have) (?:just )?(?:implemented (?:it|this|the)|fixed (?:it|this)|"
+    r"made (?:the |some |minimal |a few )?changes to (?:fix|resolve|address|solve))\b",
+    r"\b(?:my|the) (?:work|changes|fix) (?:is|are) ready\b",
+    r"\b(?:i want to|can (?:we|i)|could (?:we|i)|we can) (?:both )?collab(?:orate)?\b",
+    r"\bi(?:'ll| will) (?:take a look|look) into (?:this|it)\b",
+    r"^\s*(?:hi,?\s*)?i(?:'m| am) interested[.!]?\s*$",
     # bot commands used by Kubernetes, pandas, Zulip, Rust, Beam and others
     r"^\s*/(?:assign(?:-me)?|take|claim|attempt)\s*$",
     r"^\s*\.take(?:-issue)?\s*$",
-    r"^\s*@\w+bot\s+claim\b",
+    r"^\s*@[\w-]+\s+(?:claim|assign)\s*$",  # "@zulipbot claim", "@openwisp-companion assign"
+    # Git Bash on Windows turns a typed /assign into a path.
+    r"^\s*[a-z]:/program files/git/(?:assign|take|claim)\s*$",
 ]
 _RELEASE_PATTERNS = [
     r"^\s*/(?:unassign(?:-me)?|release|unclaim)\s*$",
@@ -349,10 +381,58 @@ def _pull_key(pr: LinkedPullRequest, repo: str) -> tuple[str, int | None]:
     return ((match.group(1) if match else repo).lower(), pr.number)
 
 
+def _source_repo(source: dict[str, Any]) -> str:
+    """owner/name of the repository a cross-referencing issue or PR lives in."""
+    named = str((source.get("repository") or {}).get("full_name") or "")
+    return named or _issue_repo(source)
+
+
+def _related_repo(source: str, repo: str) -> bool:
+    """A pull request that can fix an issue: in its repository, a sibling repository of
+    the same owner, or a fork (same name). A pull request in an unrelated project that
+    only mentions the issue is not one: this tool's own repository once named a
+    CircuitVerse issue in a merged pull request, and `issue` then said a merged pull
+    request "may already" have fixed it.
+    """
+    if not source or not repo:
+        return True
+    s_owner, _, s_name = source.lower().partition("/")
+    r_owner, _, r_name = repo.lower().partition("/")
+    return s_owner == r_owner or s_name == r_name
+
+
 def _issue_repo(issue: dict[str, Any]) -> str:
     url = str(issue.get("html_url") or "")
     parts = url.split("github.com/", 1)[-1].split("/")
     return "/".join(parts[:2]) if len(parts) >= 2 else ""
+
+
+_FIX_VERB = r"\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\b"
+
+
+def says_it_fixes(text: str, repo: str, number: object, *, pr_repo: str = "") -> bool:
+    """True when a pull request's text says it fixes this issue.
+
+    GitHub closes an issue only for "Fixes #671" merged into the default branch. mofa's
+    "- Fixes issue #671" and mixxx's "Fixes first-run experience for #14905's underlying
+    UX issue" (merged into a release branch) left both issues open, and `recommend`
+    showed them as free starter issues.
+    """
+    if not number or not text:
+        return False
+    # A bare "#671" means the pull request's own repository's issue: it counts only for
+    # a pull request in the issue's repository. One from a sibling repository must name
+    # "owner/repo#671" or link the issue.
+    own = not pr_repo or pr_repo.lower() == repo.lower()
+    forms = [rf"(?<![\w/.-])#{number}(?!\d)"] if own else []
+    if repo:
+        forms += [rf"{re.escape(repo)}#{number}(?!\d)", rf"{re.escape(repo)}/issues/{number}(?!\d)"]
+    if not forms:
+        return False
+    ref = "|".join(forms)
+    # Up to 80 characters of the same sentence: a full stop ends it, a dot in a link
+    # ("github.com/...") does not.
+    return bool(re.search(rf"{_FIX_VERB}(?:[^.\n]|\.(?=\S)){{0,80}}?(?:{ref})", text, re.I))
 
 
 def assess_issue(
@@ -424,7 +504,14 @@ def assess_issue(
                 caveats.append(f"@{login} was unassigned later; the issue is open again")
         elif kind == "cross-referenced":
             source = (event.get("source") or {}).get("issue") or {}
-            if "pull_request" in source:
+            where = _source_repo(source)
+            if "pull_request" in source and not _related_repo(where, repo):
+                # Shown, so nothing is hidden, but it neither takes nor fixes the issue.
+                caveats.append(
+                    f"A pull request in another project, {where}#{source.get('number')}, "
+                    "mentions this issue; it does not change its status here"
+                )
+            elif "pull_request" in source:
                 merged_at = _dt((source.get("pull_request") or {}).get("merged_at"))
                 merged = merged_at is not None
                 number = source.get("number")
@@ -432,6 +519,7 @@ def assess_issue(
                 if merged_at and opened and merged_at < opened:
                     earlier.add(key)
                 touched = _dt(source.get("updated_at"))
+                text = f"{source.get('title') or ''}\n{source.get('body') or ''}"
                 linked[key] = LinkedPullRequest(
                     number=int(number) if number else None,
                     url=source.get("html_url"),
@@ -439,6 +527,10 @@ def assess_issue(
                     author=_login(source.get("user")),
                     draft=bool(source.get("draft")),
                     idle_days=(now - touched).days if touched else None,
+                    # Merged after the issue opened, like the decision below requires.
+                    fixes=merged
+                    and not (merged_at and opened and merged_at < opened)
+                    and says_it_fixes(text, repo, issue.get("number"), pr_repo=where),
                 )
         elif kind == "connected":
             caveats.append(
@@ -460,6 +552,7 @@ def assess_issue(
         touched = _dt(pull.get("updated_at"))
         if merged_at and opened and merged_at < opened:
             earlier.add(f"comment-{where}-{number}")
+        text = f"{pull.get('title') or ''}\n{pull.get('body') or ''}"
         linked[f"comment-{where}-{number}"] = LinkedPullRequest(
             number=number,
             url=pull.get("html_url") or f"https://github.com/{where}/pull/{number}",
@@ -468,6 +561,9 @@ def assess_issue(
             draft=bool(pull.get("draft")),
             idle_days=(now - touched).days if touched else None,
             via_comment=True,
+            fixes=state == "merged"
+            and not (merged_at and opened and merged_at < opened)
+            and says_it_fixes(text, repo, issue.get("number"), pr_repo=where),
         )
 
     assignees = [a for a in (_login(x) for x in issue.get("assignees") or []) if a]
@@ -481,7 +577,7 @@ def assess_issue(
     # often a follow-up to it ("Follow-up on PR #1695", opened 26 minutes after the merge).
     before = {id(linked[k]) for k in earlier if k in linked}
     merged_prs = [p for p in prs if p.state == "merged" and id(p) not in before]
-    if any(not p.via_comment for p in merged_prs):
+    if any(not p.via_comment and not p.fixes for p in merged_prs):
         caveats.append("A merged PR references this issue; it may already be partly fixed")
     # A comment can link a merged pull request as the fix or as an example to copy.
     for p in [p for p in merged_prs if p.via_comment][:2]:
@@ -534,6 +630,17 @@ def assess_issue(
                 "whether its author is still working on it before you start"
             )
         return result(Availability.LIKELY_TAKEN, reason)
+
+    # Merged and saying it fixes this, but GitHub left the issue open (no closing
+    # keyword it knows, or a merge into a release branch): probably done already.
+    fixed = [p for p in merged_prs if p.fixes]
+    if fixed:
+        return result(
+            Availability.LIKELY_TAKEN,
+            f"Merged PR {_pull_ref(fixed[0], repo)} says it fixes this, though the issue is "
+            "still open: it is probably done. Ask in the thread whether anything is left "
+            "before you start",
+        )
 
     names = [
         str(lab.get("name") if isinstance(lab, dict) else lab) for lab in issue.get("labels") or []
@@ -589,7 +696,12 @@ def assess_issue(
         )
     if activity_days is not None and activity_days > STALE_DAYS and not maintainer_engaged:
         return result(Availability.STALE, f"No activity for {activity_days} days")
-    return result(Availability.AVAILABLE, "Open, unassigned, no open PR or recent claim")
+    # "Recent" said in days: a beginner read "no recent claim" right above a claim made
+    # 50 days ago and could not tell which was true.
+    return result(
+        Availability.AVAILABLE,
+        f"Open, unassigned, no open PR, and no claim in the last {RECENT_CLAIM_DAYS} days",
+    )
 
 
 def unverified_assessment() -> IssueAssessment:

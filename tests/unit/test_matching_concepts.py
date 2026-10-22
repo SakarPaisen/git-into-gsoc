@@ -37,6 +37,14 @@ from git_into_gsoc.matching.profile import (
         ("leaflet", "leaflet"),
         ("game moding", "games"),
         ("web backends", "backend"),
+        # From accepted 2026 projects (dev) the ranker missed.
+        ("linting", "developer tools"),
+        ("code quality", "developer tools"),
+        ("mailing lists", "communication"),
+        ("hardware design", "embedded"),
+        # A common beginner's interest that read as data science or as nothing.
+        ("data structures", "algorithms"),
+        ("competitive programming", "algorithms"),
     ],
 )
 def test_peoples_words_reach_the_concept_they_mean(typed: str, concept: str) -> None:
@@ -130,6 +138,11 @@ def test_in_a_phrase_the_specific_word_wins_over_an_ambiguous_one() -> None:
     assert resolve("realtime chat").concepts == ("communication",)
     assert resolve("realtime").concepts == ("embedded",)
     assert resolve("real-time systems").concepts == ("embedded",)
+    # A quantum chemistry tag is chemistry, not quantum computing, and routing
+    # protocols are networking, not maps.
+    assert find_tag_concepts("quantum chemistry") == {"chemistry": 1}
+    assert resolve("routing protocols").concepts == ("networking",)
+    assert resolve("map routing").concepts == ("geospatial",)
 
 
 def test_skills_come_down_to_the_languages_github_searches() -> None:
@@ -148,3 +161,25 @@ def test_a_search_can_cover_several_languages_and_their_relatives() -> None:
     assert language_group(["python", "javascript"]) == (
         "(language:python OR language:javascript OR language:typescript)"
     )
+
+
+def test_competency_words_count_when_typed_but_not_in_an_ideas_page() -> None:
+    # "Write code with good code quality" asks for a habit, not a subject (see #292).
+    assert find_concepts("Write good code quality and fix linting issues") == {}
+    # 115 of 183 organizations list a mailing list as a contact channel: "ask on our
+    # mailing list" in an ideas page is how to reach them, not what they work on.
+    assert find_concepts("Ask on our mailing list; we run style checkers in CI") == {}
+    assert find_tag_concepts("mailing lists") == {"communication": 1}
+    assert find_tag_concepts("code quality") == {"developer tools": 1}
+    assert resolve("hardware design").concepts == ("embedded",)
+
+
+def test_misspelled_algorithm_words_reach_algorithms_through_the_fuzzy_path() -> None:
+    # dev3 (common beginners): "data structers" read as data science.
+    for typed, meant in [
+        ("data structers", "data structures"),
+        ("algoritms", "algorithms"),
+        ("competitive programing", "competitive programming"),
+    ]:
+        found = resolve(typed)
+        assert found.concepts == ("algorithms",) and found.corrected_from == meant
