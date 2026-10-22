@@ -1217,7 +1217,9 @@ class GSoCToolkit:
                 if len(issues) > first
                 else f" Other organizations that use {language} had none free either."
             )
-        if use_gsoc and language:
+        if use_gsoc and language and not gsoc_owners:
+            # With an organization named (`--org CERN-HSF`), other organizations that keep
+            # code off GitHub are beside the point: the note listed SageMath and ns-3.
             note += self._skipped_off_github(language, year=year)
         related = RELATED_LANGUAGES.get(canonical(language), []) if language else []
         if related and not repo:
