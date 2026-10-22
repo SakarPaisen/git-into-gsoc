@@ -1,4 +1,6 @@
-"""Pure helpers for repository intelligence (no I/O, easy to test)."""
+"""Pure functions over GitHub repository payloads: pull request statistics, beginner
+labels, mirrors, and a repository's points as a first stop. No I/O, so each one is
+easy to test."""
 
 from __future__ import annotations
 
@@ -10,11 +12,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from git_into_gsoc.labels import BEGINNER_LABELS
+from git_into_gsoc.labels import is_beginner_label as is_beginner_label  # matching uses it
 from git_into_gsoc.matching.concepts import find_concepts, find_tag_concepts
 from git_into_gsoc.matching.concepts import label as concept_label
 from git_into_gsoc.matching.ideas import known_skills, wanted_domains
 from git_into_gsoc.matching.profile import ContributorProfile
-from git_into_gsoc.scoring.issues import BEGINNER_WORDS_RE
 from git_into_gsoc.scoring.org_match import canonical
 
 KNOWN_BOTS = {
@@ -29,20 +32,6 @@ KNOWN_BOTS = {
     "greenkeeper",
 }
 OUTSIDER_ROLES = {"CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE"}
-BEGINNER_LABELS = (
-    "good first issue",
-    "good-first-issue",
-    "good first bug",
-    "first-timers-only",
-    "beginner",
-    "beginner friendly",
-    "beginner-friendly",
-    "easy",
-    "starter",
-    "newcomer",
-    "difficulty: easy",
-    "level: easy",
-)
 TOOLCHAIN_FILES: dict[str, str] = {
     "pyproject.toml": "Python project (pyproject.toml)",
     "setup.py": "Python project (setup.py)",
@@ -204,6 +193,79 @@ def closed_outside_unmerged(
     return sorted(picked, key=lambda p: str(p.get("created_at") or ""), reverse=True)
 
 
+def outside_authors_merged(pulls: list[dict[str, Any]], *, since: datetime) -> int:
+    """Distinct people without write access whose pull request merged since `since`."""
+    authors = {
+        str((p.get("user") or {}).get("login"))
+        for p in pulls
+        if not is_bot(p.get("user"))
+        and p.get("author_association") in OUTSIDER_ROLES
+        and (_dt(p.get("merged_at")) or since) > since
+    }
+    return len(authors)
+
+
+@dataclass
+class OutsideMerges:
+    """What a sample of recently closed pull requests says about outside contributions."""
+
+    authors: int  # distinct people without write access merged in the window covered
+    humans: int  # pull requests in the sample not opened by a bot
+    sampled: int
+    days: int  # how far back the window reaches: OUTSIDE_WINDOW_DAYS, or less
+
+
+def outside_merges(
+    pulls: list[dict[str, Any]], *, now: datetime | None = None, page: int = 30
+) -> OutsideMerges:
+    """Outside merges in the period the sample really covers.
+
+    The sample is the most recently updated closed pull requests. A full page of them
+    may reach back only weeks, so the window is cut to the oldest one; a shorter page
+    is the repository's whole history, so the full window holds.
+    """
+    now = now or datetime.now(UTC)
+    window = now - timedelta(days=OUTSIDE_WINDOW_DAYS)
+    stamps = [d for d in (_dt(p.get("updated_at") or p.get("closed_at")) for p in pulls) if d]
+    start = window
+    if len(pulls) >= page and stamps and min(stamps) > window:
+        start = min(stamps)
+    # Count every outside merge the sample holds within the full window; the shorter
+    # span only limits what a "none merged" claim may say.
+    return OutsideMerges(
+        authors=outside_authors_merged(pulls, since=window),
+        humans=sum(1 for p in pulls if not is_bot(p.get("user"))),
+        sampled=len(pulls),
+        days=max(1, (now - start).days),
+    )
+
+
+def outside_merges_points(found: OutsideMerges) -> tuple[float, str]:
+    """Points and a reason from how many outside contributors got work merged lately."""
+    period = (
+        "in the last day"
+        if found.days <= 1
+        else f"in the last {min(found.days, OUTSIDE_WINDOW_DAYS)} days"
+    )
+    full = f"in the last {OUTSIDE_WINDOW_DAYS} days"
+    if not found.sampled:
+        return -QUIET_POINTS, "No closed pull requests yet, so no sign it takes outside work"
+    if not found.humans:
+        return 0.0, (
+            "Its recent closed pull requests are all from bots, so outside work could not be judged"
+        )
+    if found.authors == 0:
+        return (
+            -QUIET_POINTS,
+            f"No pull request from outside the team merged {period} (its last "
+            f"{found.sampled} closed)",
+        )
+    # A merge was counted over the full window, whatever span "none" could claim.
+    if found.authors >= 3:
+        return 6.0, f"{found.authors} people outside the team got a pull request merged {full}"
+    return 2.0, f"{found.authors} outside contributor(s) got a pull request merged {full}"
+
+
 def pull_stats(
     pulls: list[dict[str, Any]],
     *,
@@ -327,10 +389,7 @@ def pick_beginner_label(labels: list[dict[str, Any]]) -> str | None:
             return names[wanted]
     # Spellings seen once each across GSoC organizations' repositories: "first
     # contrib", "newbie-friendly", "difficulty: starter", "good_for_beginners".
-    for lower, original in names.items():
-        if _BEGINNER_WORDS.search(lower):
-            return original
-    return None
+    return next((original for original in names.values() if is_beginner_label(original)), None)
 
 
 _MIRROR_START = re.compile(r"^\W*(?:read[- ]only\s+)?mirror\s+(?:of|from)\b", re.I)
@@ -371,11 +430,8 @@ def beginner_labels(labels: list[dict[str, Any]], *, limit: int = 3) -> list[str
     """
     names = {str(label.get("name") or "").lower(): str(label.get("name")) for label in labels}
     found = [names[w] for w in BEGINNER_LABELS if w in names]
-    found += [o for low, o in names.items() if _BEGINNER_WORDS.search(low) and o not in found]
+    found += [o for o in names.values() if is_beginner_label(o) and o not in found]
     return found[:limit]
-
-
-_BEGINNER_WORDS = BEGINNER_WORDS_RE  # one rule for the search and for scoring
 
 
 # Repositories for an event or its notes ("disc-unconference-2023-projects",
@@ -445,12 +501,6 @@ def is_main_repo(full_name: str, *, most_starred: bool = False) -> bool:
     return most_starred or (bool(owner) and _flat(name) == _flat(owner))
 
 
-def is_beginner_label(name: str) -> bool:
-    """True for a label that marks an issue as suitable for a newcomer."""
-    low = name.strip().lower()
-    return low in BEGINNER_LABELS or bool(_BEGINNER_WORDS.search(low))
-
-
 def detect_toolchain(
     entries: list[dict[str, Any]], *, language: str | None = None
 ) -> tuple[list[str], bool]:
@@ -474,13 +524,93 @@ def detect_toolchain(
 
 def contributing_path(profile: dict[str, Any]) -> str | None:
     """Repo-relative path of CONTRIBUTING from a community-profile payload."""
-    html_url = ((profile.get("files") or {}).get("contributing") or {}).get("html_url")
+    return _profile_file_path(profile, "contributing")
+
+
+def readme_path(profile: dict[str, Any]) -> str | None:
+    """Repo-relative path of the README from a community-profile payload."""
+    return _profile_file_path(profile, "readme")
+
+
+def _profile_file_path(profile: dict[str, Any], key: str) -> str | None:
+    html_url = ((profile.get("files") or {}).get(key) or {}).get("html_url")
     if not html_url:
         return None
     parts = urlparse(str(html_url)).path.split("/")
     if "blob" in parts:
         index = parts.index("blob")
         return unquote("/".join(parts[index + 2 :])) or None
+    return None
+
+
+# "Contributing", "How To Contribute", "Contribution guidelines". Not "Contributors",
+# which heads a list of names (p5.js-website has both).
+_CONTRIBUTING_HEADING_RE = re.compile(r"\bcontribut(?:e|ing|ions?)\b", re.I)
+_ATX_HEADING_RE = re.compile(r"^(#{1,6})\s+\S")
+_HTML_HEADING_RE = re.compile(r"^\s*<h([1-6])\b", re.I)
+_UNDERLINE_RE = re.compile(r"^\s*([=\-~^*])\1{2,}\s*$")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+# A section this short ("Contributions welcome!") gives a newcomer nothing to follow.
+MIN_README_SECTION_CHARS = 200
+
+
+def _heading_level(lines: list[str], index: int) -> int:
+    """The heading level of lines[index] (Markdown, setext or reST, HTML), or 0."""
+    line = lines[index]
+    if m := _ATX_HEADING_RE.match(line):
+        return len(m.group(1))
+    if m := _HTML_HEADING_RE.match(line):
+        return int(m.group(1))
+    below = lines[index + 1] if index + 1 < len(lines) else ""
+    if line.strip() and not _UNDERLINE_RE.match(line) and (m := _UNDERLINE_RE.match(below)):
+        return 1 if m.group(1) == "=" else 2
+    return 0
+
+
+def _fenced(lines: list[str]) -> set[int]:
+    """Indexes of lines inside fenced code blocks, fences included.
+
+    A shell comment such as "# install the deps" in a code block is not a heading.
+    """
+    inside: set[int] = set()
+    fence: str | None = None
+    for index, line in enumerate(lines):
+        if m := _FENCE_RE.match(line):
+            if fence is None:
+                fence = m.group(1)
+            elif m.group(1) == fence:
+                fence = None
+            inside.add(index)
+        elif fence is not None:
+            inside.add(index)
+    return inside
+
+
+def readme_contributing_section(text: str) -> str | None:
+    """The body of a README's section on contributing, when it says enough to follow.
+
+    Some projects keep their rules there instead of in a CONTRIBUTING file:
+    p5.js-website's "How To Contribute" says which issues can be requested and to wait
+    to be assigned.
+    """
+    lines = text.splitlines()
+    fenced = _fenced(lines)
+    for index, line in enumerate(lines):
+        level = 0 if index in fenced else _heading_level(lines, index)
+        if not level or not _CONTRIBUTING_HEADING_RE.search(line):
+            continue
+        start = index + (
+            2 if _UNDERLINE_RE.match(lines[index + 1] if index + 1 < len(lines) else "") else 1
+        )
+        body: list[str] = []
+        for later in range(start, len(lines)):
+            found = 0 if later in fenced else _heading_level(lines, later)
+            if found and found <= level:
+                break
+            body.append(lines[later])
+        section = "\n".join(body).strip()
+        if len(re.sub(r"\s+", " ", section)) >= MIN_README_SECTION_CHARS:
+            return section
     return None
 
 
@@ -509,6 +639,12 @@ LARGE_REPO_KB = 1_000_000  # about 1 GB on GitHub's own count
 # Main repositories first; repositories around the project (an ideas page often links
 # its GSoC or governance repository) after them. Set from a blind review of 20 live runs.
 MAIN_REPO_POINTS = 12.0
+# A repository where nobody outside the team got work merged lately is a poor first
+# stop, whatever its other signals: the most common bad pick in a blind review.
+QUIET_POINTS = 20.0
+OUTSIDE_WINDOW_DAYS = 180
+OUTSIDE_CHECKED = 5
+OUTSIDE_BUDGET = 15  # requests per `repos` call, so a run without a token stays light
 _KIND_PENALTY = {"not code": 45.0, "plumbing": 30.0, "website": 25.0}
 _KIND_REASON = {
     "not code": "A GSoC, event, or governance repository, not the project's code",

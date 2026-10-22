@@ -381,3 +381,110 @@ def test_a_broad_word_in_a_name_is_not_what_an_organization_is_named_after() -> 
     perfusion = _org("Open Science Imaging Group", tech=["python"], topics=["science"])
     ranked = _rank([perfusion], technologies=["python"], interests=["science"], experience="some")
     assert not any(r.startswith("Named after") for r in ranked[0].reasons())
+
+
+def test_readiness_says_whether_an_organization_labels_first_tasks_on_github() -> None:
+    quiet = _org("Lab Without Labels", tech=["python"], topics=["physics"])
+    busy = _org("Labelling Lab", tech=["python"], topics=["physics"])
+
+    def github(labelled: int) -> dict[str, Any]:
+        return {"active_repos": 8, "languages": {"Python": 8}, "beginner_issues_year": labelled}
+
+    signals = {
+        "year": 2026,
+        "organizations": {
+            "lab-without-labels": {"github": github(0)},
+            "labelling-lab": {"github": github(14)},
+        },
+    }
+    ranked = {m.org.name: m for m in _rank([quiet, busy], signals=signals, interests=["physics"])}
+    # Zero is never stated: the project may use its own label ("Difficulty-easy").
+    assert not any("beginner label" in line for line in ranked["Lab Without Labels"].readiness)
+    line = next(x for x in ranked["Labelling Lab"].readiness if "beginner label" in x)
+    # Said as a habit, never as issues open now.
+    assert line.startswith(
+        "14 GitHub issues with a common beginner label were opened in the past year"
+    )
+    assert "open or since closed" in line and "issues --org" in line
+    # Evidence only: the two still tie on everything that ranks them.
+    assert ranked["Lab Without Labels"].score == ranked["Labelling Lab"].score
+
+
+def test_a_reported_statement_is_a_quoted_caveat_and_leaves_the_score() -> None:
+    org = _org("Symbolic Lab", tech=["python"], topics=["mathematics"])
+    said = {
+        "status": "reported",
+        "year": 2027,
+        "url": "https://github.com/lab/lab/issues/7",
+        "quote": "we will not participate in GSoC this year",
+        "date": "2026-10-04",
+        "by_maintainer": False,
+        "checked": "2026-10-22",
+    }
+    plain = _rank([org], interests=["mathematics"])[0]
+    signals = {"year": 2026, "organizations": {"symbolic-lab": {"participation": said}}}
+    reported = _rank([org], signals=signals, interests=["mathematics"])[0]
+    caveat = next(c for c in reported.caveats if "wrote in its tracker" in c)
+    assert "someone GitHub does not list as a maintainer" in caveat and "2026-10-04" in caveat
+    assert "Not an official statement about GSoC 2027" in caveat
+    assert reported.score == plain.score
+
+
+def test_most_ideas_needing_an_unlisted_skill_is_a_caveat_not_a_cost() -> None:
+    php = _org("Judge Site", tech=["javascript", "php"], topics=["education"])
+    ideas = {"count": 6, "skills": {"php": 5, "javascript": 1}}
+    signals = {"year": 2026, "organizations": {"judge-site": {"ideas": ideas}}}
+    judge = _rank([php], signals=signals, technologies=["javascript"], interests=["education"])[0]
+    assert any("Most of its ideas need PHP" in c for c in judge.caveats)
+
+
+def test_one_or_two_beginner_issues_in_a_year_are_not_shown() -> None:
+    lab = _org("Small Lab", tech=["python"], topics=["physics"])
+    signals = {
+        "year": 2026,
+        "organizations": {
+            "small-lab": {
+                "github": {"active_repos": 8, "languages": {"Python": 8}, "beginner_issues_year": 2}
+            }
+        },
+    }
+    ranked = _rank([lab], signals=signals, interests=["physics"])
+    assert not any("beginner label" in line for line in ranked[0].readiness)
+
+
+def test_a_narrowing_word_favours_the_organization_that_names_it() -> None:
+    person = build_profile(interests=["database internals", "storage engines"])
+    assert person.interests[0].qualifiers == ("internal", "storage", "engine")
+    tables = _org("Tables Inc", tech=["c++"], topics=["databases"], description="A database.")
+    engine = _org(
+        "Engine Room", tech=["c++"], topics=["databases"], description="A storage engine."
+    )
+    ranked = _rank([*ORGS, tables, engine], interests=["database internals", "storage engines"])
+    assert [m.org.name for m in ranked[:2]] == ["Engine Room", "Tables Inc"]
+    assert "names 'storage' in its listing or ideas" in ranked[0].evidence()[0]
+
+
+def test_words_that_spell_the_subject_or_say_nothing_do_not_narrow_it() -> None:
+    person = build_profile(interests=["front end", "real-time operating systems", "web apps"])
+    assert [w.qualifiers for w in person.interests] == [(), ("real-time",), ()]
+
+
+def test_a_language_family_counts_together_and_sites_are_not_the_code() -> None:
+    from git_into_gsoc.matching.rank import _main_language
+
+    org = _org("Contracts", tech=["python"], topics=["natural language processing"])
+    person = build_profile(technologies=["python"], interests=["natural language processing"])
+
+    def caveat(languages: dict[str, int], active: int) -> str | None:
+        signals = {"github": {"active_repos": active, "languages": languages}}
+        return _main_language(build_org_profile(org, signals=signals), person)
+
+    # 3 TypeScript and 2 JavaScript of 9: neither alone is 40%, together they are.
+    said = caveat({"TypeScript": 3, "JavaScript": 2, "Python": 1, "HTML": 3}, 9)
+    assert said and said.startswith("Its code is mostly TypeScript and JavaScript")
+    # Documentation sites in HTML are not what contributors write.
+    assert caveat({"HTML": 5, "Python": 4}, 9) is None
+    # A TypeScript developer knows the family.
+    ts = build_profile(technologies=["typescript"], interests=["natural language processing"])
+    signals = {"github": {"active_repos": 9, "languages": {"TypeScript": 3, "JavaScript": 2}}}
+    assert _main_language(build_org_profile(org, signals=signals), ts) is None

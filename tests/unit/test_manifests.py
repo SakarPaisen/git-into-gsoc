@@ -1,3 +1,6 @@
+"""The generated plugin manifests and registry entry: in step with their definition, versioned, and
+running the server from their own copy."""
+
 from __future__ import annotations
 
 import json
@@ -12,7 +15,12 @@ def _load(name: str) -> dict:  # type: ignore[type-arg]
     return json.loads((ROOT / name).read_text(encoding="utf-8"))
 
 
-VERSIONED = (".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "gemini-extension.json")
+VERSIONED = (
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    ".github/plugin/plugin.json",
+    "gemini-extension.json",
+)
 
 
 def test_manifests_match_their_single_definition() -> None:
@@ -32,10 +40,25 @@ def test_manifest_versions_match_the_package() -> None:
         assert _load(name)["version"] == __version__, name
     server = _load("server.json")
     assert server["version"] == __version__
-    assert len(server["description"]) <= 100  # the registry rejects longer descriptions
-    package = server["packages"][0]
-    assert package["registryType"] == "mcpb"
-    assert "mcp" in package["identifier"] and len(package["fileSha256"]) == 64
+    # Committed, it lists the newest PyPI release; the release workflow pins the version
+    # and puts that release's bundle first.
+    (package,) = server["packages"]
+    assert package["registryType"] == "pypi" and "version" not in package
+    assert package["identifier"] == "git-into-gsoc"
+
+
+def test_the_registry_entry_follows_the_official_schema() -> None:
+    import jsonschema
+
+    server = _load("server.json")
+    schema_file = "mcp-server-" + server["$schema"].split("/")[-2] + ".schema.json"
+    schema = _load(f"tests/fixtures/{schema_file}")  # a copy, as tests never use the network
+    assert schema["$id"] == server["$schema"]
+    jsonschema.validate(server, schema)
+    # The registry only takes https icons, and the site must keep serving them.
+    for icon in server["icons"]:
+        assert icon["src"].startswith("https://anandkaranubc.github.io/git-into-gsoc/brand/")
+        assert (ROOT / icon["src"].split("/git-into-gsoc/", 1)[1]).is_file()
 
 
 def test_release_please_bumps_every_versioned_manifest() -> None:
@@ -50,10 +73,12 @@ def test_each_plugin_runs_the_server_from_its_own_installed_copy() -> None:
     claude = _load(".claude-plugin/plugin.json")["mcpServers"]["git-into-gsoc"]
     codex = _load(".codex-plugin/plugin.json")["mcpServers"]["git-into-gsoc"]
     gemini = _load("gemini-extension.json")["mcpServers"]["git-into-gsoc"]
+    copilot = _load(".github/plugin/plugin.json")["mcpServers"]["git-into-gsoc"]
     assert claude["args"] == ["--from", "${CLAUDE_PLUGIN_ROOT}", "git-into-gsoc", "mcp"]
+    assert copilot["args"] == ["--from", "${PLUGIN_ROOT}", "git-into-gsoc", "mcp"]
     assert gemini["args"] == ["--from", "${extensionPath}", "git-into-gsoc", "mcp"]
     assert codex["args"] == ["--from", ".", "git-into-gsoc", "mcp"] and codex["cwd"] == "."
-    for entry in (claude, codex, gemini):
+    for entry in (claude, codex, gemini, copilot):
         assert entry["command"] == "uvx"
     # Codex passes servers only a few variables and allows 10 s to start by default.
     assert "GITHUB_TOKEN" in codex["env_vars"] and codex["startup_timeout_sec"] >= 60
@@ -66,6 +91,8 @@ def test_plugins_find_the_skill_and_their_images() -> None:
     plugin = _load(".claude-plugin/plugin.json")
     codex = _load(".codex-plugin/plugin.json")
     assert codex["skills"] == "./skills/"
+    # awesome-copilot's checks read Copilot's manifest, which names the skill folder.
+    assert _load(".github/plugin/plugin.json")["skills"] == "skills/"
     for path in (plugin["icon"], codex["interface"]["logo"], codex["interface"]["composerIcon"]):
         assert (ROOT / path).is_file(), path
     marketplace = _load(".claude-plugin/marketplace.json")
@@ -93,3 +120,6 @@ def test_mcpb_bundle_builds_with_a_uv_manifest(tmp_path: Path) -> None:
     assert manifest["server"]["type"] == "uv"
     assert manifest["version"] == __version__
     assert manifest["server"]["mcp_config"]["args"][-2:] == ["git-into-gsoc", "mcp"]
+    # Claude Desktop shows the icon, and its directory asks for support and privacy links.
+    assert manifest["icon"] in names
+    assert manifest["support"].endswith("/issues") and manifest["privacy_policies"]

@@ -23,6 +23,7 @@ from typing import Any
 from git_into_gsoc.coach import LONGEST_CODING_WEEKS, PROJECT_HOURS
 from git_into_gsoc.matching.concepts import (
     CONCEPTS,
+    GENERIC_PARENTS,
     SKILL,
     broader_of,
     find_concepts,
@@ -44,8 +45,6 @@ WORD_IN_TAG, WORD_IN_TEXT = 1.0, 0.6
 # LLVM, Open Robotics) is that thing's home; it gets this much extra relevance when
 # its other evidence agrees.
 NAME_BOOST = 0.1
-# Umbrella subjects too broad to stand in for a specific interest.
-GENERIC_PARENTS = frozenset({"science", "web"})
 # Interests and skills weigh the same (tuned on the dev half of evals/; see evals/README.md).
 INTEREST_WEIGHT = 0.5
 SYNERGY = 0.1
@@ -72,6 +71,13 @@ TIME_MISFIT = 0.85
 # Most of its active code is in a language the person did not list, so a tag naming
 # theirs is likely a side project (tuned on the dev sets of evals/).
 OTHER_MAIN_LANGUAGE = 0.95
+MAIN_LANGUAGE_SHARE = 0.4
+FAMILY_SKIP = frozenset({"html", "css"})
+# "Most of its ideas need X" stays a caveat only. A x0.95 cost helped the dev sets but
+# made both held-out sets worse (holdout2 and holdout3), so it was taken out.
+
+# Beginner-labelled issues in a year below which the count says nothing useful.
+MIN_LABELLED = 3
 # How much a phrase's common concept counts against its rarest one (see match_term).
 SPECIFIC_POWER = 1.0
 FIT_STRONG, FIT_GOOD, FIT_MIN = 0.7, 0.45, 0.12
@@ -79,6 +85,11 @@ DIVERSITY = 0.08
 STANDARD_WEEKS = 12
 # From this many matching organizations, a word is broad enough to suggest narrower ones.
 SHARPEN_AT = 25
+# "music notation" reads as music: an organization whose own text never names
+# "notation" matches it this much less. A word named by more than this share of
+# organizations says too little to count.
+QUALIFIER_MISS = 0.85
+QUALIFIER_MAX_SHARE = 0.15
 
 
 @dataclass
@@ -113,6 +124,7 @@ class OrgMatch:
     caveats: list[str] = field(default_factory=list)
     skills_to_learn: list[str] = field(default_factory=list)
     extra_reasons: list[str] = field(default_factory=list)
+    ideas_unread: bool = False
 
     @property
     def participation(self) -> dict[str, Any] | None:
@@ -247,6 +259,8 @@ def _years_line(org: OrgSummary, reference_year: int) -> tuple[float, str | None
         if year in years:
             streak += 1
         elif year != 2016 - 1:
+            # The shipped history starts in 2016, so a missing 2015 is unknown, not a
+            # year the organization sat out.
             break
     if not years:
         return 0.0, None
@@ -379,6 +393,7 @@ class OrgIndex:
     signals_date: str | None = None
     breadth: dict[str, tuple[float, float]] = field(default_factory=dict)
     _broad_cache: dict[tuple[str, ...], bool] = field(default_factory=dict, repr=False)
+    _qualifier_cache: dict[str, int] = field(default_factory=dict, repr=False)
 
     @classmethod
     def build(
@@ -422,6 +437,20 @@ class OrgIndex:
                 for w in person.interests
             )
         return self._broad_cache[key]
+
+    def _telling(self, want: Want) -> list[re.Pattern[str]]:
+        """Patterns for the words that narrow an interest and tell organizations apart."""
+        out = []
+        for word in want.qualifiers:
+            body = r"[\s-]?".join(re.escape(part) for part in word.split("-"))
+            pattern = re.compile(rf"(?<![a-z0-9]){body}[a-z0-9]*")
+            if word not in self._qualifier_cache:
+                self._qualifier_cache[word] = sum(
+                    1 for p in self.profiles if pattern.search(p.text)
+                )
+            if 0 < self._qualifier_cache[word] <= QUALIFIER_MAX_SHARE * len(self.profiles):
+                out.append(pattern)
+        return out
 
     def coverage(self, person: ContributorProfile) -> list[str]:
         """Skills that few or no organizations use, said plainly."""
@@ -509,6 +538,14 @@ class OrgIndex:
         category: str = "",
         limit: int | None = None,
     ) -> list[OrgMatch]:
+        """Organizations for this person, best first.
+
+        `query` is free text to match as well; `category` must match the listing's
+        category. With a query, a category, or a non-empty profile, organizations
+        whose relevance is under FIT_MIN are left out; with none, every organization
+        is listed, ordered by its track record (years in a row, project slots, and
+        ideas readiness), then by its tie-breakers.
+        """
         query = query.strip()
         category = category.strip().lower()
         ceiling = math.log(len(self.profiles) + 1) + 1.0
@@ -552,6 +589,15 @@ class OrgIndex:
                 return None
             extra.append(f"Category: {org.category}")
         interests = [match_term(profile, w, self.idf) for w in person.interests]
+        for term in interests:
+            telling = self._telling(term.want) if term.how != "word" else []
+            if term.strength <= 0 or not telling:
+                continue
+            named = next((m.group(0) for t in telling if (m := t.search(profile.text))), None)
+            if named:
+                term.evidence = [f"names '{named}' in its listing or ideas", *term.evidence]
+            else:
+                term.strength *= QUALIFIER_MISS
         skills = [match_term(profile, w, self.idf) for w in person.skills]
         skill_scale, domain_scale = self.breadth.get(org.name, (1.0, 1.0))
         for term in skills:
@@ -654,9 +700,25 @@ class OrgIndex:
                 f"Had not decided about GSoC {said_year} (checked {said.get('checked')}): "
                 f"{said.get('url')}"
             )
-        if profile.ideas.get("url") and (
+        elif said.get("status") == "reported" and said_year > self.reference_year:
+            # Quoted, dated, and marked as a report: no year was named, so it is not
+            # the organization's word on GSoC {said_year}, and the score stays.
+            # Only what GitHub shows: private membership reads as a plain contributor,
+            # so "not listed as a maintainer" is all that can be said of anyone else.
+            who = (
+                "a maintainer"
+                if said.get("by_maintainer")
+                else "someone GitHub does not list as a maintainer"
+            )
+            caveats.append(
+                f'On {said.get("date")}, {who} wrote in its tracker: "{said.get("quote")}" '
+                f"Not an official statement about GSoC {said_year}; check its channels: "
+                f"{said.get('url')}"
+            )
+        ideas_unread = bool(profile.ideas.get("url")) and (
             not profile.ideas.get("count") or _poorly_split(profile.ideas)
-        ):
+        )
+        if ideas_unread:
             caveats.append(_unread_ideas(str(profile.ideas.get("layout") or "")))
         needs = _mostly_needs(profile, person) if not person.empty else []
         if needs:
@@ -675,6 +737,15 @@ class OrgIndex:
         active = int(profile.github.get("active_repos") or 0)
         if active:
             readiness_lines.append(f"{active} GitHub repositories pushed in the last year")
+        labelled = int(profile.github.get("beginner_issues_year") or 0)
+        if labelled >= MIN_LABELLED:
+            # A habit, not a list of open issues: an assistant read "1 beginner-labelled
+            # issue" as one open now. Zero is not shown either: MDAnalysis marks first
+            # tasks "Difficulty-easy" and Neovim "complexity:low", which are not counted.
+            readiness_lines.append(
+                f"{labelled} GitHub issues with a common beginner label were opened in the "
+                "past year (open or since closed); `issues --org` shows the ones open now"
+            )
 
         # A fit needs something to fit: a category or a bare listing has none.
         fit = _fit_level(relevance, interests, skills) if (query or not person.empty) else None
@@ -705,6 +776,7 @@ class OrgIndex:
             caveats=caveats,
             skills_to_learn=_skills_to_learn(profile, person) if not person.empty else [],
             extra_reasons=extra,
+            ideas_unread=ideas_unread,
         )
 
 
@@ -762,10 +834,23 @@ def _main_language(profile: OrgProfile, person: ContributorProfile) -> str | Non
     languages = github.get("languages") or {}
     if active < 3 or not languages or person.empty or not person.skills:
         return None
-    name, count = max(languages.items(), key=lambda kv: kv[1])
-    if count / active < 0.4:
+    # One family per language a person would learn (TypeScript and Vue count with
+    # JavaScript); HTML and CSS repositories are mostly sites and docs, not the code.
+    families: dict[str, dict[str, int]] = {}
+    for lang, n in languages.items():
+        for concept in language_concepts({lang: int(n)}):
+            if concept in FAMILY_SKIP:
+                continue
+            root = "javascript" if "javascript" in broader_of(concept) else concept
+            families.setdefault(root, {})[lang] = int(n)
+    if not families:
         return None
-    concepts = language_concepts({name: count})
+    root, members = max(families.items(), key=lambda kv: sum(kv[1].values()))
+    count = sum(members.values())
+    if count / active < MAIN_LANGUAGE_SHARE:
+        return None
+    name = " and ".join(sorted(members, key=lambda k: -members[k])[:2])
+    concepts = {root: count, **{c: count for lang in members for c in language_concepts({lang: 1})}}
     known: set[str] = set()
     for want in person.skills:
         for concept in want.concepts:

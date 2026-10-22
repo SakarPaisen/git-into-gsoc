@@ -1,4 +1,5 @@
-"""GitHub REST API client focused on contributor intelligence."""
+"""GitHub REST API client: repositories, issues, pull requests, and what they say about
+how a project treats newcomers."""
 
 from __future__ import annotations
 
@@ -11,7 +12,13 @@ from urllib.parse import quote
 
 from git_into_gsoc.config import Settings, get_settings
 from git_into_gsoc.errors import InputError, RateLimitError
-from git_into_gsoc.github.announcements import gsoc_posts, search_terms, wiki_post
+from git_into_gsoc.github.announcements import (
+    body_search_terms,
+    gsoc_posts,
+    reported_statements,
+    search_terms,
+    wiki_post,
+)
 from git_into_gsoc.github.availability import (
     MAINTAINER_ROLES,
     assess_issue,
@@ -32,6 +39,8 @@ from git_into_gsoc.github.repos import (
     mirror_source,
     pick_beginner_label,
     pull_stats,
+    readme_contributing_section,
+    readme_path,
 )
 from git_into_gsoc.github.search import build_issue_query, language_group
 from git_into_gsoc.http_client import CachedHttpClient, HttpError, NotFoundError
@@ -60,7 +69,7 @@ def _parse_dt(value: str | None) -> datetime | None:
 
 
 def _excerpt(text: str | None, limit: int = 400) -> str:
-    """One line of an issue body. HTML comments go first: GitHub hides them from
+    """One line of an issue body, with HTML comments removed: GitHub hides them from
     people, so they are the easiest place to leave text only a model would read."""
     if not text:
         return ""
@@ -133,6 +142,18 @@ def _candidate_from_search(item: dict[str, Any]) -> IssueCandidate | None:
 
 
 class GitHubClient:
+    """Every GitHub read the tool makes, through the shared caching HTTP client.
+
+    Two kinds of method. Reads of the thing the person asked for (`get_repo`,
+    `get_issue`, `assess`, `repo_health`) raise `HttpError` or `NotFoundError` with a
+    message that says what to try. Reads that only feed a score or a list
+    (`get_issue_timeline`, `list_assignees`, `recent_comments`, ...) swallow HTTP
+    errors and return an empty value or None, so one failed call cannot sink a whole
+    report; what the report then says about the gap is the caller's job. A token
+    raises the request limit and turns on the GraphQL path in `repo_health`; nothing
+    needs one.
+    """
+
     def __init__(
         self,
         settings: Settings | None = None,
@@ -264,14 +285,58 @@ class GitHubClient:
             return None
         return int(data.get("total_count") or 0)
 
-    def gsoc_year_posts(self, owners: list[str], year: int) -> list[dict[str, Any]]:
-        """Issues in these owners' repositories whose title names GSoC and `year` (one search)."""
+    def beginner_issues_opened(
+        self, owners: list[str], *, since: str, labels: list[str]
+    ) -> int | None:
+        """Issues opened since `since` (YYYY-MM-DD) with a beginner label, open or closed.
+
+        One search call; None when the search fails. It shows whether an organization
+        marks first tasks on GitHub at all, which a count of open issues on one day
+        cannot.
+        """
+        logins = [validate_login(o, kind="organization") for o in owners if o]
+        if not logins:
+            return None
+        query = build_issue_query(
+            base=["is:issue", f"created:>={since}"], labels=labels, orgs=logins
+        )
+        try:
+            # The label OR group needs the advanced engine; the classic one returns 0.
+            data = self._api(
+                "search/issues", params={"q": query, "per_page": 1, "advanced_search": "true"}
+            )
+        except HttpError:
+            return None
+        if not isinstance(data, dict) or "total_count" not in data:
+            return None
+        return int(data.get("total_count") or 0)
+
+    def gsoc_year_posts(
+        self, owners: list[str], year: int, *, bodies: bool = False
+    ) -> list[dict[str, Any]]:
+        """Issues in these owners' repositories whose title names GSoC and `year` (one search).
+
+        With `bodies`, a second search reads recent issue bodies for a statement that
+        names no year (status "reported"), for the monthly evidence.
+        """
         logins = [validate_login(o, kind="organization") for o in dict.fromkeys(owners)]
         if not logins:
             return []
         query = build_issue_query(base=search_terms(year), labels=[], orgs=logins)
         posts = gsoc_posts(self.search_issues(query, per_page=30, sort="created"), year=year)
+        if bodies:
+            since = (datetime.now(UTC) - timedelta(days=150)).date().isoformat()
+            query = build_issue_query(base=body_search_terms(since), labels=[], orgs=logins)
+            # Most recently updated first; a statement older than the newest 50 GSoC
+            # mentions in a busy organization is missed until it is updated again.
+            posts += reported_statements(self.search_issues(query, per_page=50), year=year)
         return self._wiki_posts(logins[:2], year) + posts
+
+    def wiki_year_posts(self, owners: list[str], year: int) -> list[dict[str, Any]]:
+        """Only the wiki statements of `gsoc_year_posts`. They take no search, so they
+        can still be read when GitHub's search limit stops the rest."""
+        logins = [validate_login(o, kind="organization") for o in dict.fromkeys(owners)]
+        return self._wiki_posts(logins[:2], year)
 
     def _wiki_posts(self, owners: list[str], year: int) -> list[dict[str, Any]]:
         """Statements about `year` on the wiki home pages of each owner's two biggest repos."""
@@ -360,6 +425,14 @@ class GitHubClient:
             return False
 
     def get_raw_file(self, owner: str, repo: str, path: str) -> str | None:
+        try:
+            return self._raw_file(owner, repo, path)
+        except HttpError:
+            return None
+
+    def _raw_file(self, owner: str, repo: str, path: str) -> str | None:
+        """The file's text, or None when it does not exist. Raises HttpError when GitHub
+        does not answer, so `repo_health` can tell the two apart."""
         owner, repo = parse_repo(f"{owner}/{repo}")
         url = f"{self.settings.github_api_url.rstrip('/')}/repos/{owner}/{repo}/contents/" + quote(
             path.lstrip("/"), safe="/"
@@ -368,40 +441,79 @@ class GitHubClient:
         headers["Accept"] = "application/vnd.github.raw+json"
         try:
             return self.http.get_text(url, headers=headers)
-        except HttpError:
+        except NotFoundError:
             return None
 
+    def _readme_guide_path(self, owner: str, repo: str, profile: dict[str, Any]) -> str | None:
+        """The README's path when it has a section on contributing worth following.
+
+        One cached request, made only for a repository with no CONTRIBUTING file. Raises
+        HttpError when GitHub does not send the README: that is unread, not a README
+        without a guide.
+        """
+        if (profile.get("files") or {}).get("contributing"):
+            return None
+        path = readme_path(profile)
+        text = self._raw_file(owner, repo, path) if path else None
+        return path if text and readme_contributing_section(text) else None
+
     def community_profile(self, owner: str, repo: str) -> dict[str, Any]:
-        try:
-            data = self._api(f"repos/{owner}/{repo}/community/profile")
-        except HttpError:
-            return {}
-        return data if isinstance(data, dict) else {}
+        return self._community_profile(owner, repo) or {}
 
     def workflow_count(self, owner: str, repo: str) -> int:
-        try:
-            data = self._api(f"repos/{owner}/{repo}/actions/workflows", params={"per_page": 1})
-        except HttpError:
-            return 0
-        return int(data.get("total_count") or 0) if isinstance(data, dict) else 0
+        return self._workflow_count(owner, repo) or 0
 
     def list_labels(self, owner: str, repo: str) -> list[dict[str, Any]]:
-        try:
-            data = self._api(f"repos/{owner}/{repo}/labels", params={"per_page": 100})
-        except HttpError:
-            return []
-        return data if isinstance(data, list) else []
+        return self._list_labels(owner, repo) or []
 
     def count_open_issues_with_label(self, owner: str, repo: str, label: str) -> tuple[int, int]:
         """Open issues with the label, and how many of them are assigned to someone."""
+        return self._count_open_issues_with_label(owner, repo, label) or (0, 0)
+
+    # The same reads for `repo_health`, which must tell "GitHub did not answer" (None)
+    # from "the repository has none": a rate limit used to read as no CONTRIBUTING guide,
+    # no Code of Conduct, and no CI, and lowered the grade by up to 28 points. A 404 is
+    # an answer.
+    def _community_profile(self, owner: str, repo: str) -> dict[str, Any] | None:
+        try:
+            data = self._api(f"repos/{owner}/{repo}/community/profile")
+        except NotFoundError:
+            return {}
+        except HttpError:
+            return None
+        return data if isinstance(data, dict) else {}
+
+    def _workflow_count(self, owner: str, repo: str) -> int | None:
+        try:
+            data = self._api(f"repos/{owner}/{repo}/actions/workflows", params={"per_page": 1})
+        except NotFoundError:
+            return 0
+        except HttpError:
+            return None
+        return int(data.get("total_count") or 0) if isinstance(data, dict) else 0
+
+    def _list_labels(self, owner: str, repo: str) -> list[dict[str, Any]] | None:
+        try:
+            data = self._api(f"repos/{owner}/{repo}/labels", params={"per_page": 100})
+        except NotFoundError:
+            return []
+        except HttpError:
+            return None
+        return data if isinstance(data, list) else []
+
+    def _count_open_issues_with_label(
+        self, owner: str, repo: str, label: str
+    ) -> tuple[int, int] | None:
         try:
             data = self._api(
                 f"repos/{owner}/{repo}/issues",
                 params={"labels": label, "state": "open", "per_page": 100},
                 ttl=900,
             )
-        except HttpError:
+        except NotFoundError:
             return 0, 0
+        except HttpError:
+            return None
         issues = [i for i in data if "pull_request" not in i] if isinstance(data, list) else []
         assigned = sum(1 for i in issues if i.get("assignee") or i.get("assignees"))
         return len(issues), assigned
@@ -467,10 +579,10 @@ class GitHubClient:
         raw = self.get_repo(owner, repo)
         owner, repo = (raw.get("full_name") or f"{owner}/{repo}").split("/", 1)
         with ThreadPoolExecutor(max_workers=self.settings.max_concurrency) as pool:
-            profile_f = pool.submit(self.community_profile, owner, repo)
-            workflows_f = pool.submit(self.workflow_count, owner, repo)
+            profile_f = pool.submit(self._community_profile, owner, repo)
+            workflows_f = pool.submit(self._workflow_count, owner, repo)
             analysis_f = pool.submit(self.pull_analysis, owner, repo)
-            labels_f = pool.submit(self.list_labels, owner, repo)
+            labels_f = pool.submit(self._list_labels, owner, repo)
             commits_f = pool.submit(
                 fetch_commit_stats,
                 self.http,
@@ -479,9 +591,21 @@ class GitHubClient:
                 repo=repo,
                 ttl=self.settings.archive_ttl_seconds,
             )
-            profile, workflows = profile_f.result(), workflows_f.result()
-            analysis, labels = analysis_f.result(), labels_f.result()
+            profile_or_none, workflows_or_none = profile_f.result(), workflows_f.result()
+            analysis, labels_or_none = analysis_f.result(), labels_f.result()
             commits = commits_f.result()
+        unread = [
+            name
+            for name, value in (
+                ("community profile", profile_or_none),
+                ("workflows", workflows_or_none),
+                ("labels", labels_or_none),
+            )
+            if value is None
+        ]
+        profile = profile_or_none or {}
+        workflows = workflows_or_none or 0
+        labels = labels_or_none or []
         if analysis is not None:
             stats = pull_stats(analysis.pulls, insiders=analysis.insiders)
             pr_source = "graphql"
@@ -527,10 +651,26 @@ class GitHubClient:
             if landed:
                 stats = pull_stats(source_pulls, insiders=source_insiders, landed=frozenset(landed))
         files = profile.get("files") or {}
+        contributing_source = "file" if files.get("contributing") else None
+        if contributing_source is None:
+            # It runs after the pull request reads, so it is the read most likely to
+            # meet the limit.
+            try:
+                if self._readme_guide_path(owner, repo, profile):
+                    contributing_source = "readme"
+            except HttpError:
+                unread.append("README")
         label = pick_beginner_label(labels)
-        open_beginner, assigned_beginner = (
-            self.count_open_issues_with_label(owner, repo, label) if label else (None, None)
-        )
+        if label and raw.get("has_issues") is False:
+            # Issues are turned off (the project tracks work elsewhere), yet GitHub's
+            # default labels remain. None are open here, and the issues endpoint answers
+            # 410, which retrying never changes.
+            counted: tuple[int, int] | None = (0, 0)
+        else:
+            counted = self._count_open_issues_with_label(owner, repo, label) if label else None
+        if label and counted is None:
+            unread.append("beginner issues")
+        open_beginner, assigned_beginner = counted or (None, None)
         health = RepoHealth(
             full_name=f"{owner}/{repo}",
             url=raw.get("html_url", f"https://github.com/{owner}/{repo}"),
@@ -544,13 +684,15 @@ class GitHubClient:
             pushed_at=_parse_dt(raw.get("pushed_at")),
             license=_license_name(raw.get("license")),
             topics=list(raw.get("topics") or []),
-            has_contributing=bool(files.get("contributing")),
+            has_contributing=contributing_source is not None,
+            contributing_source=contributing_source,
             has_code_of_conduct=bool(
                 files.get("code_of_conduct") or files.get("code_of_conduct_file")
             ),
             has_issue_template=bool(files.get("issue_template")),
             has_pr_template=bool(files.get("pull_request_template")),
             has_ci=workflows > 0,
+            unread=unread,
             prs_sampled=stats.sampled,
             merge_rate=stats.merge_rate,
             median_pr_hours=stats.median_hours,
@@ -706,7 +848,8 @@ class GitHubClient:
         if "pull_request" in issue:
             raise InputError(
                 f"{owner}/{repo}#{number} is a pull request, not an issue",
-                hint="Pass the issue number the PR addresses.",
+                hint="Pass the issue number the PR addresses. To check a pull request, run "
+                f"`git-into-gsoc pr-check {owner}/{repo}#{number}`.",
             )
         timeline = self._timeline_with_imports(owner, repo, number, issue)
         if timeline is None:
@@ -800,34 +943,58 @@ class GitHubClient:
         owner, repo = parse_repo(full_name)
         full_name = f"{owner}/{repo}"
         with ThreadPoolExecutor(max_workers=3) as pool:
-            profile_f = pool.submit(self.community_profile, owner, repo)
+            profile_f = pool.submit(self._community_profile, owner, repo)
             root_f = pool.submit(self.root_listing, owner, repo)
             labels_f = pool.submit(self.list_labels, owner, repo)
-            profile, root, labels = profile_f.result(), root_f.result(), labels_f.result()
+            profile_or_none, root, labels = profile_f.result(), root_f.result(), labels_f.result()
+        # As in `repo_health`: a read GitHub did not answer is unread, not "no guide". A
+        # rate limit used to make `draft claim` say "no contributing guide found".
+        unread = [] if profile_or_none is not None else ["community profile"]
+        profile = profile_or_none or {}
         files = profile.get("files") or {}
         path = contributing_path(profile)
-        text = (self.get_raw_file(owner, repo, path) if path else None) or ""
+        text = ""
+        if path:
+            try:
+                text = self._raw_file(owner, repo, path) or ""
+            except HttpError:
+                unread.append("contributing guide")
         coc = files.get("code_of_conduct_file") or files.get("code_of_conduct") or {}
         try:
             language = self.get_repo(owner, repo).get("language")
         except HttpError:
             language = None
         toolchain, devcontainer = detect_toolchain(root, language=language)
+        readme = None
+        if not path:
+            try:
+                readme = self._readme_guide_path(owner, repo, profile)
+            except HttpError:
+                unread.append("README")
         hints = list(toolchain)
         if devcontainer:
             hints.insert(0, "Dev container available: open in Codespaces/VS Code for a ready env")
-        if not hints:
+        if unread:
+            hints.append(
+                f"GitHub did not answer for its {', '.join(unread)}, so the contributing "
+                "guide was not read; run it again later"
+            )
+        elif not hints:
             # Naming a file the repository does not have read as a contradiction next
             # to "No CONTRIBUTING guide detected" (a blind beginner run, 2026-10-22).
             hints.append(
                 "Read README.md and CONTRIBUTING.md before coding"
                 if path
+                else f"Read the contributing section of {readme} before coding"
+                if readme
                 else "Read README.md before coding"
             )
         beginner = [str(lab.get("name")) for lab in labels if pick_beginner_label([lab])]
+        # "Read first" points at the README when its section is the contributing guide.
+        guide_file = files.get("contributing") or (files.get("readme") if readme else None) or {}
         return ContributionGuide(
             repo=full_name,
-            contributing_url=(files.get("contributing") or {}).get("html_url"),
+            contributing_url=guide_file.get("html_url"),
             contributing_excerpt=_excerpt(text, 1500),
             contributing_text=text,
             code_of_conduct_url=coc.get("html_url"),
@@ -836,6 +1003,7 @@ class GitHubClient:
             setup_hints=hints,
             communication_channels=channels_in(text),
             beginner_issue_labels=beginner or ["good first issue"],
+            unread=unread,
         )
 
     def list_owner_repos(self, owner: str, *, pages: int = 1) -> list[dict[str, Any]]:
@@ -1009,10 +1177,36 @@ class GitHubClient:
             return []
         runs = data.get("check_runs") if isinstance(data, dict) else None
         return [
-            {"name": r.get("name"), "status": r.get("status"), "conclusion": r.get("conclusion")}
+            {
+                "name": r.get("name"),
+                "status": r.get("status"),
+                "conclusion": r.get("conclusion"),
+                # For GitHub Actions the check run's id is the job's id, which has a log.
+                "id": r.get("id"),
+                "app": ((r.get("app") or {}).get("slug") or "")
+                if isinstance(r.get("app"), dict)
+                else "",
+            }
             for r in runs or []
             if isinstance(r, dict)
         ]
+
+    def job_log_tail(self, owner: str, repo: str, job_id: int) -> str:
+        """The end of a GitHub Actions job's log, where the failure is.
+
+        GitHub shows job logs only to signed-in requests, so this needs a token.
+        """
+        if not self.token:
+            raise HttpError(
+                "Reading a CI log needs a GitHub token.",
+                hint="Run `gh auth login`, or set GITHUB_TOKEN.",
+            )
+        owner, repo = parse_repo(f"{owner}/{repo}")
+        url = (
+            f"{self.settings.github_api_url.rstrip('/')}/repos/{owner}/{repo}"
+            f"/actions/jobs/{int(job_id)}/logs"
+        )
+        return self.http.get_tail(url, headers=self._headers())
 
     def branch_rules(self, owner: str, repo: str, branch: str) -> list[dict[str, Any]]:
         """Active ruleset rules on a branch (readable without a token for public repos).

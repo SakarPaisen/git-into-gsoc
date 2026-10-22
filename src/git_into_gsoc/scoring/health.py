@@ -20,6 +20,8 @@ DORMANT_CAP = 57.0
 # that service has no commit history for a repository the score leaves these points out
 # instead of counting them as lost.
 NEWCOMER_POINTS = 6
+# Why a signal GitHub did not answer for is left out of the score.
+UNREAD_WHY = "GitHub did not answer; run it again later"
 # Up to this many changed lines, the median merged outside PR is a focused change.
 FOCUSED_PR_LINES = 200
 
@@ -109,45 +111,69 @@ def score_repo_health(health: RepoHealth) -> RepoHealth:
         """A pull request figure, marked as old when the repository has gone quiet."""
         return f"Before it went quiet: {text[0].lower()}{text[1:]}" if dormant else text
 
-    if health.has_contributing:
-        signals.append("Has a CONTRIBUTING guide")
+    unread = set(health.unread)
+    if "community profile" in unread:
+        # GitHub did not answer for the community profile, so these say nothing about
+        # the repository: left out of the score, like missing ecosyste.ms data. A rate
+        # limit used to read as no CONTRIBUTING guide, Code of Conduct, or templates.
+        award("CONTRIBUTING guide", 0, 0, UNREAD_WHY)
+        award("Code of Conduct", 0, 0, UNREAD_WHY)
+        award("Issue or PR templates", 0, 0, UNREAD_WHY)
     else:
-        warnings.append("No CONTRIBUTING guide detected; ask maintainers how to start")
-    award("CONTRIBUTING guide", 12 if health.has_contributing else 0, 12)
-    if health.has_code_of_conduct:
-        signals.append("Has a Code of Conduct")
-    award("Code of Conduct", 4 if health.has_code_of_conduct else 0, 4)
-    templates = health.has_issue_template or health.has_pr_template
-    if templates:
-        signals.append("Issue/PR templates guide contributions")
-    award("Issue or PR templates", 4 if templates else 0, 4)
-    if health.has_ci:
-        signals.append("CI runs on pull requests")
-    award("CI on pull requests", 8 if health.has_ci else 0, 8)
+        if health.has_contributing:
+            signals.append(
+                "Has contributing rules in its README (no separate CONTRIBUTING file)"
+                if health.contributing_source == "readme"
+                else "Has a CONTRIBUTING guide"
+            )
+            award("CONTRIBUTING guide", 12, 12)
+        elif "README" in unread:
+            # No CONTRIBUTING file, and GitHub did not send the README that could hold
+            # the guide instead.
+            award("CONTRIBUTING guide", 0, 0, UNREAD_WHY)
+        else:
+            warnings.append("No CONTRIBUTING guide detected; ask maintainers how to start")
+            award("CONTRIBUTING guide", 0, 12)
+        if health.has_code_of_conduct:
+            signals.append("Has a Code of Conduct")
+        award("Code of Conduct", 4 if health.has_code_of_conduct else 0, 4)
+        templates = health.has_issue_template or health.has_pr_template
+        if templates:
+            signals.append("Issue/PR templates guide contributions")
+        award("Issue or PR templates", 4 if templates else 0, 4)
+    if "workflows" in unread:
+        award("CI on pull requests", 0, 0, UNREAD_WHY)
+    else:
+        if health.has_ci:
+            signals.append("CI runs on pull requests")
+        award("CI on pull requests", 8 if health.has_ci else 0, 8)
 
-    open_issues = health.open_beginner_issues or 0
-    free = open_issues - (health.assigned_beginner_issues or 0)
-    beginner = 0.0
-    if open_issues and free > 0:
-        beginner = 10
-        total = f" ({open_issues} open in total)" if free < open_issues else ""
-        signals.append(
-            f"{free} open '{health.beginner_label}' issue(s) nobody is assigned to{total}"
+    if unread & {"labels", "beginner issues"}:
+        award("Open beginner issues", 0, 0, UNREAD_WHY)
+    else:
+        open_issues = health.open_beginner_issues or 0
+        free = open_issues - (health.assigned_beginner_issues or 0)
+        beginner = 0.0
+        if open_issues and free > 0:
+            beginner = 10
+            total = f" ({open_issues} open in total)" if free < open_issues else ""
+            signals.append(
+                f"{free} open '{health.beginner_label}' issue(s) nobody is assigned to{total}"
+            )
+        elif open_issues:
+            beginner = 2
+            warnings.append(
+                f"All {open_issues} open '{health.beginner_label}' issue(s) are already assigned"
+            )
+        elif health.beginner_label:
+            beginner = 4
+            warnings.append(f"'{health.beginner_label}' label exists but no open issues use it")
+        award(
+            "Open beginner issues",
+            beginner,
+            10,
+            None if health.beginner_label else "no beginner label found",
         )
-    elif open_issues:
-        beginner = 2
-        warnings.append(
-            f"All {open_issues} open '{health.beginner_label}' issue(s) are already assigned"
-        )
-    elif health.beginner_label:
-        beginner = 4
-        warnings.append(f"'{health.beginner_label}' label exists but no open issues use it")
-    award(
-        "Open beginner issues",
-        beginner,
-        10,
-        None if health.beginner_label else "no beginner label found",
-    )
 
     # Worth less than the outside merge rate below: most of these PRs come from the
     # core team, and the outside ones are counted again there.
@@ -155,10 +181,11 @@ def score_repo_health(health: RepoHealth) -> RepoHealth:
     if health.merge_rate is not None and health.prs_sampled >= 5:
         if health.merge_rate >= 0.5:
             merged = 8
-            signals.append(past(f"Healthy merge rate ({health.merge_rate:.0%} of human PRs)"))
+            # A plain figure: "Healthy" over a 52% rate read as praise it had not earned.
+            signals.append(past(f"{health.merge_rate:.0%} of human PRs merged"))
         elif health.merge_rate >= 0.25:
             merged = 4
-            signals.append(past(f"Moderate merge rate ({health.merge_rate:.0%})"))
+            signals.append(past(f"{health.merge_rate:.0%} of human PRs merged"))
         else:
             warnings.append(f"Low merge rate ({health.merge_rate:.0%})")
         award("Merge rate of all human PRs", merged, 8)
@@ -251,8 +278,13 @@ def score_repo_health(health: RepoHealth) -> RepoHealth:
                 f"Pull requests from outsiders wait ~{first / 24:.0f}d for a first human reply (median)"
             )
         if health.median_pr_hours is not None:
+            # The team's own pull requests are in this figure too, so it can sit beside a
+            # long wait for an outsider's first reply.
             notes.append(
-                past(f"Merged PRs land in ~{_days_or_hours(health.median_pr_hours)} (median)")
+                past(
+                    f"Merged PRs, the team's included, land in "
+                    f"~{_days_or_hours(health.median_pr_hours)} (median)"
+                )
             )
     elif health.median_pr_hours is not None:
         if health.median_pr_hours <= 72:
@@ -335,6 +367,13 @@ def score_repo_health(health: RepoHealth) -> RepoHealth:
         cap_reason = (
             f"Nothing was pushed for over {DORMANT_DAYS} days, so the score stops at "
             f"{DORMANT_CAP:.0f}"
+        )
+    if unread:
+        parts = sorted(unread)
+        notes.append(
+            f"GitHub did not answer for its {', '.join(parts)}, so the signals that come from "
+            f"{'it' if len(parts) == 1 else 'them'} are left out of the score; run it again "
+            "later for a full grade"
         )
     # Out of what could be read: missing ecosyste.ms data leaves its points out.
     out_of = sum(p.most for p in points)

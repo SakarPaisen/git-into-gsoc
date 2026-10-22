@@ -15,6 +15,7 @@ from typing import Any
 from git_into_gsoc.coach import LONGEST_CODING_WEEKS, PROJECT_HOURS
 from git_into_gsoc.matching.concepts import (
     DOMAIN,
+    GENERIC_PARENTS,
     SKILL,
     broader_of,
     find_concepts,
@@ -36,6 +37,10 @@ _DIFFICULTY_FOR = {
 
 @dataclass
 class IdeaFit:
+    """How one idea fits a person: a score up to 1 (below 0 when the idea is too big
+    for their hours), the skills they have and would learn, the interests it matches,
+    and the facts the page states."""
+
     score: float
     have: list[str] = field(default_factory=list)
     to_learn: list[str] = field(default_factory=list)
@@ -59,12 +64,46 @@ def known_skills(person: ContributorProfile) -> set[str]:
 
 
 def wanted_domains(person: ContributorProfile) -> set[str]:
+    """The subjects the person cares about, with the narrower ones under each; a broad
+    word such as "web" is not widened."""
     wanted: set[str] = set()
     for want in person.interests:
         for concept in want.concepts:
             wanted.add(concept)
-            wanted.update(narrower_index().get(concept, ()))
+            # "Websites" is not caring about backends: a broad subject is not widened.
+            if concept not in GENERIC_PARENTS:
+                wanted.update(narrower_index().get(concept, ()))
     return wanted
+
+
+# What a contributor does or has on any project ("Debug; fix CI failures", "Write Python
+# code with unit tests", "A source code editor"), listed under Oppia's and InVesalius'
+# skills: not what the project is about. Read as subjects, they put developer tools in
+# 10 of Oppia's 11 ideas and all 9 of InVesalius'. "debugger" and "code review tool"
+# name what a project builds, so they stay.
+_COMPETENCY_RE = re.compile(
+    r"\bdebug(?:s|ged|ging)?\b|\bunit tests?\b|"
+    r"\b(?:write|writing|add|adding)\s+(?:\w+\s+){0,3}?tests?\b|"
+    r"\bfix(?:ing)?\s+(?:\w+\s+){0,2}?(?:ci|tests?|failures?|bugs?)\b|\bci failures?\b|"
+    r"\bflak\w*|\bcode reviews?\b(?!\s+(?:tool|bot|app|platform|system)s?\b)|\broot cause\b|"
+    r"\b(?:a|any|your)\s+(?:favou?rite\s+|preferred\s+)?(?:source[- ]code|code|text)\s+editor"
+    r"(?:\s+of\s+your\s+choice|\s+installed)?\s*(?:$|[.,;:)])",
+    re.I,
+)
+_PRACTICE_SUBJECTS = frozenset({"developer tools", "devops"})
+
+
+def skill_concepts(skill: str) -> list[str]:
+    """Concepts a skills-field entry names, without the ones only its competencies name.
+
+    "Write Python code with unit tests" is something a contributor does; "test
+    frameworks" or "testing" can be what a project is about, and stay.
+    """
+    found = list(find_tag_concepts(skill))
+    if _PRACTICE_SUBJECTS & set(found) and _COMPETENCY_RE.search(skill):
+        still = set(find_tag_concepts(_COMPETENCY_RE.sub(" ", skill)))
+        found = [c for c in found if c not in _PRACTICE_SUBJECTS or c in still]
+    return found
 
 
 def idea_concepts(
@@ -73,7 +112,7 @@ def idea_concepts(
     """Skill concepts and subject concepts an idea names (labelled skills first)."""
     found: dict[str, None] = dict.fromkeys(known or [])
     for skill in skills or []:
-        found.update(dict.fromkeys(find_tag_concepts(skill)))
+        found.update(dict.fromkeys(skill_concepts(skill)))
     found.update(dict.fromkeys(find_concepts(text)))
     skill_keys = [c for c in found if kind_of(c) == SKILL and c not in _EVERYWHERE]
     domain_keys = [c for c in found if kind_of(c) == DOMAIN]
@@ -179,7 +218,16 @@ def fit_idea(
     domain_keys: list[str],
     difficulty: str | None = None,
     size: str | None = None,
+    hours: int | None = None,
 ) -> IdeaFit:
+    """Score an idea for the person from what it names and what the page states.
+
+    Up to half the score: the share of the idea's skills the person has. A wanted
+    subject adds 0.3. A stated difficulty adds up to 0.15, most for the level it
+    suits. A size (the hours the page states, or the size's usual hours) that fits
+    the person's hours in the longest coding period adds 0.05; one that does not
+    costs 0.3 and marks the idea too big.
+    """
     known = known_skills(person)
     wanted = wanted_domains(person)
     have = [c for c in skill_keys if c in known]
@@ -197,7 +245,8 @@ def fit_idea(
         score += 0.15 * _DIFFICULTY_FOR[level].get(difficulty, 0.5)
         notes.append(f"stated difficulty: {difficulty}")
     if size:
-        hours = PROJECT_HOURS.get(size)
+        # The hours the page states win over the size's usual ones (FreeBSD's 500).
+        hours = hours or PROJECT_HOURS.get(size)
         notes.append(f"{size} ({hours} hours)" if hours else size)
         if person.hours_per_week and hours:
             if hours > person.hours_per_week * LONGEST_CODING_WEEKS:
@@ -244,6 +293,7 @@ def ideas_for(
             domain_keys=domain_keys,
             difficulty=idea.get("d"),
             size=idea.get("s"),
+            hours=idea.get("h"),
         )
         if fit.score <= 0.15 or not (fit.have or fit.topics) or fit.too_big:
             continue

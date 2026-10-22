@@ -9,10 +9,11 @@ sources say what it actually works on:
   their languages and topics.
 
 Reading 183 ideas pages and as many repository lists takes minutes, so
-`python -m git_into_gsoc.matching.signals` does it once (weekly, with the
-organization snapshot) and writes ``data/org_signals.json``. Ranking reads
-that file offline and says how old it is. Nothing here is a prediction: every
-number is a count of something a person can open and check.
+`python -m git_into_gsoc.matching.signals` does it once and writes
+``data/org_signals.json``. The snapshot-refresh workflow runs it on the first
+Monday of each month (the organization snapshot itself is refreshed weekly).
+Ranking reads that file offline and says how old it is. Nothing here is a
+prediction: every number is a count of something a person can open and check.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from git_into_gsoc.coach import PROJECT_HOURS
 from git_into_gsoc.matching.concepts import (
     SKILL,
     find_concepts,
@@ -36,14 +38,13 @@ from git_into_gsoc.matching.concepts import (
     kind_of,
     resolve,
 )
-from git_into_gsoc.matching.ideas import is_real_idea
+from git_into_gsoc.matching.ideas import is_real_idea, skill_concepts
 
 SIGNALS_FILE = "org_signals.json"
 # MediaWiki section headings end in an "[edit]" link.
 _EDIT_LINK = re.compile(r"\s*\[\s*edit(?:\s+source)?\s*\]\s*$", re.I)
 MAX_IDEAS_KEPT = 40
 MAX_TITLE = 100
-_FOLLOW_SUB_PAGES = 8
 
 
 def _data_dir() -> Path:
@@ -100,7 +101,7 @@ def summarize_ideas(ideas: list[dict[str, Any]], *, layout: str, url: str) -> di
             size[str(idea["size"])] += 1
         labelled: set[str] = set()
         for skill in idea.get("skills") or []:
-            labelled.update(find_tag_concepts(str(skill)))
+            labelled.update(skill_concepts(str(skill)))
         text = " ".join([str(idea.get("title") or ""), str(idea.get("description") or "")])
         named = set(find_concepts(text)) | labelled
         skills.update(labelled)
@@ -113,6 +114,10 @@ def summarize_ideas(ideas: list[dict[str, Any]], *, layout: str, url: str) -> di
                 entry["d"] = idea["difficulty"]
             if idea.get("size"):
                 entry["s"] = idea["size"]
+                # Hours the page states that are not the size's own (MetaBrainz's 300):
+                # the time fit then uses them.
+                if idea.get("hours") and idea["hours"] != PROJECT_HOURS.get(idea["size"]):
+                    entry["h"] = idea["hours"]
             concepts = sorted(labelled) + sorted(named - labelled)
             if concepts:
                 entry["k"] = concepts[:8]
@@ -187,34 +192,59 @@ def language_concepts(languages: dict[str, int]) -> dict[str, int]:
 
 
 def _ideas_for(toolkit: Any, raw: dict[str, Any], ttl: int) -> dict[str, Any] | None:
-    from git_into_gsoc.gsoc.project_ideas import fetch_ideas_document, issues_page_target
-    from git_into_gsoc.service import _looks_like_ideas_page
-
+    # The same reading `ideas` shows: one reader, so the snapshot cannot drift from it.
     url = raw.get("ideas_link")
     if not url:
         return None
-    target = issues_page_target(url)
-    doc = (
-        toolkit._ideas_from_issues(url, *target)
-        if target
-        else fetch_ideas_document(toolkit.http, url, ttl)
-    )
+    doc, _ = toolkit.read_ideas_page(str(url), ttl=ttl)
     if doc is None:
         return {"url": url, "layout": "unreachable", "count": 0}
-    if doc.layout == "index" and doc.sub_pages:
-        followed = 0
-        for page in [p for p in doc.sub_pages if _looks_like_ideas_page(p)][:_FOLLOW_SUB_PAGES]:
-            child = fetch_ideas_document(toolkit.http, page["url"], ttl)
-            if child is not None and child.ideas:
-                doc.ideas.extend(child.ideas)
-                followed += 1
-        if not followed and doc.fallback_ideas:
-            doc.ideas = list(doc.fallback_ideas)
-            doc.layout = "headings"
     return summarize_ideas([i.model_dump() for i in doc.ideas], layout=doc.layout, url=str(url))
 
 
-def _github_for(toolkit: Any, owners: list[str], now: datetime) -> dict[str, Any] | None:
+# The labels recommend searches for its starter issues, so the count matches them.
+BEGINNER_SEARCH_LABELS = (
+    "good first issue",
+    "good-first-issue",
+    "starter",
+    "beginner",
+    "easy",
+    "first-timers-only",
+)
+
+
+CANARY_SHARE = 0.8
+
+
+def search_trustworthy(toolkit: Any, previous: dict[str, dict[str, Any]] | None = None) -> bool:
+    """Whether this run's searches with an OR group can be trusted: a canary.
+
+    One label alone, then that label OR another, over the same busy organization:
+    a working engine never finds fewer for the OR. On the 2026-10-22 refresh, GitHub
+    Actions' built-in token got empty or wrong answers to every OR group (40
+    beginner-label counts went to 0, Apache's 1,929 to 28, and three participation
+    statements were lost), while plain searches worked. When the canary fails, the
+    run keeps last month's search results instead of replacing them.
+    """
+    busiest = max(
+        (previous or {}).items(),
+        key=lambda kv: int((kv[1].get("github") or {}).get("beginner_issues_year") or 0),
+        default=("", {}),
+    )[1]
+    owner = ((busiest.get("github") or {}).get("owners") or ["fossasia"])[0]
+    since = (datetime.now(UTC) - timedelta(days=365)).date().isoformat()
+    one = toolkit.github.beginner_issues_opened([owner], since=since, labels=["good first issue"])
+    either = toolkit.github.beginner_issues_opened(
+        [owner], since=since, labels=["good first issue", "beginner"]
+    )
+    # Totals for big result sets are approximate (Apache: 1,864 alone, 1,862 with the
+    # OR); the failure was far larger (1,929 to 28), so allow a small shortfall.
+    return bool(one) and either is not None and either >= CANARY_SHARE * one
+
+
+def _github_for(
+    toolkit: Any, owners: list[str], now: datetime, *, searches: bool = True
+) -> dict[str, Any] | None:
     """Repository evidence, or None when there are no owners or every listing failed."""
     from git_into_gsoc.errors import GigError
 
@@ -230,7 +260,19 @@ def _github_for(toolkit: Any, owners: list[str], now: datetime) -> dict[str, Any
             continue
     if not listed:
         return None
-    return summarize_repos(repos, owners[:3], now=now)
+    summary = summarize_repos(repos, owners[:3], now=now)
+    if not searches:
+        return summary  # last month's count stands (see search_trustworthy)
+    # Over the first three owners only (as the listing above), so for an organization
+    # with more it is a lower bound; "N issues opened" stays true.
+    labelled = toolkit.github.beginner_issues_opened(
+        owners[:3],
+        since=(now - timedelta(days=365)).date().isoformat(),
+        labels=list(BEGINNER_SEARCH_LABELS),
+    )
+    if labelled is not None:
+        summary["beginner_issues_year"] = labelled
+    return summary
 
 
 _FAILED_LAYOUTS = {"unreachable", "error"}
@@ -258,13 +300,25 @@ def keep_previous(
             kept["ideas"] = before
         if "github" not in entry and old.get("github"):
             kept["github"] = old["github"]
-        if kept.pop("_participation_failed", False) and old.get("participation"):
+        elif "beginner_issues_year" in (old.get("github") or {}) and "beginner_issues_year" not in (
+            kept.get("github") or {}
+        ):
+            # The count's search failed this time; last month's figure stands.
+            kept["github"] = {
+                **kept["github"],
+                "beginner_issues_year": old["github"]["beginner_issues_year"],
+            }
+        failed = kept.pop("_participation_failed", False)
+        if old.get("participation") and (failed or "participation" not in kept):
+            # A statement not found again stays, with its old `checked` date: the
+            # search reads only the newest issues, and a post does not stop being true
+            # because it scrolled out of them. A newer statement replaces it.
             kept["participation"] = old["participation"]
         merged[slug] = kept
     return merged
 
 
-_SAID = {"not_taking_part", "undecided", "posted"}
+_SAID = {"not_taking_part", "undecided", "posted", "reported"}
 
 
 def _participation_for(toolkit: Any, owners: list[str], now: datetime) -> dict[str, Any]:
@@ -276,19 +330,24 @@ def _participation_for(toolkit: Any, owners: list[str], now: datetime) -> dict[s
     from git_into_gsoc.service import participation_from
 
     year = toolkit.settings.target_year
-    found = participation_from(toolkit.gsoc_posts_for(owners[:3], year=year))
+    found = participation_from(toolkit.gsoc_posts_for(owners[:3], year=year, bodies=True))
     if found["status"] == "unknown":
         return {"_participation_failed": True}
     if found["status"] not in _SAID:
         return {}
-    return {
-        "participation": {
-            "status": found["status"],
-            "url": found.get("url"),
-            "year": year,
-            "checked": now.date().isoformat(),
-        }
+    said = {
+        "status": found["status"],
+        "url": found.get("url"),
+        "year": year,
+        "checked": now.date().isoformat(),
     }
+    if found["status"] == "reported":
+        said.update(
+            quote=found.get("title"),
+            date=found.get("date"),
+            by_maintainer=found.get("by_maintainer"),
+        )
+    return {"participation": said}
 
 
 def build_signals(
@@ -306,6 +365,14 @@ def build_signals(
 
     now = datetime.now(UTC)
     ttl = toolkit.settings.archive_ttl_seconds
+    searches = search_trustworthy(toolkit, previous)
+    if not searches:
+        print(
+            "Searches with an OR group failed the canary check: keeping last month's "
+            "beginner-label counts and participation. Run the refresh with a personal "
+            "read-only token to refresh them.",
+            file=sys.stderr,
+        )
 
     def one(raw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         owners, _ = github_refs(
@@ -319,11 +386,15 @@ def build_signals(
             print(f"ideas page failed for {raw.get('slug')}: {exc}", file=sys.stderr)
         if ideas:
             entry["ideas"] = ideas
-        github = _github_for(toolkit, owners, now)
+        github = _github_for(toolkit, owners, now, searches=searches)
         if github:
             entry["github"] = github
         if owners:
-            entry.update(_participation_for(toolkit, owners, now))
+            entry.update(
+                _participation_for(toolkit, owners, now)
+                if searches
+                else {"_participation_failed": True}
+            )
         return str(raw.get("slug") or raw.get("name")), entry
 
     with ThreadPoolExecutor(max_workers=8) as pool:

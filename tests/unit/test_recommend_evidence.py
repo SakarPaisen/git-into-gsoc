@@ -92,8 +92,11 @@ def test_recommend_says_the_list_is_last_years_and_shows_evidence(api: respx.Moc
     assert group["ideas"][0]["you_have"] == ["Python"]
     assert group["ideas"][0]["you_would_learn"] == ["NumPy/SciPy"]
     steps = [s["step"] for s in data["learning_path"]]
-    assert steps[0].startswith("Practise the pull request routine")
-    assert "OpenAstronomy" in steps[1]
+    # The calendar first: the 2027 list is not out, so the ideas are last year's.
+    assert steps[0].startswith("Know where GSoC is in its year: the 2027 organizations")
+    practise = next(i for i, s in enumerate(steps) if s.startswith("Practise the pull request"))
+    assert "OpenAstronomy" in steps[practise + 1]
+    assert steps[-1].startswith("Draft your proposal early")
 
 
 def test_recommend_moves_an_org_that_says_it_sits_out_and_skips_its_issues(
@@ -236,7 +239,11 @@ def test_an_empty_starter_list_names_where_to_look(
     data = toolkit.recommend_path(technologies=["python"], interests=["mathematics"])
     assert data["starter_issues"] == []
     top = data["recommended_orgs"][0]["name"]
-    assert f'git-into-gsoc issues --org "{top}"' in data["starter_issue_note"]
+    assert f'git-into-gsoc ideas "{top}"' in data["starter_issue_note"]
+    # The path agrees: no step sends the person back to the search that came back empty.
+    commands = " ".join(step["command"] for step in data["learning_path"])
+    assert "issues --org" not in commands
+    assert any("passed the checks" in step["why"] for step in data["learning_path"])
 
 
 def test_starter_issues_search_every_language_more_owners_and_beginner_labels(
